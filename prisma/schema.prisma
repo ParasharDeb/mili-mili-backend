@@ -1,0 +1,55 @@
+// Prisma schema — https://pris.ly/d/prisma-schema
+// Datasource URL is configured in prisma7.config.ts (reads DIRECT_URL).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Admins sign in with email + bcrypt-hashed password.
+model Admin {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("admins")
+}
+
+/// End users sign up / sign in with a phone number + OTP. They have no password.
+model User {
+  id              String    @id @default(uuid())
+  phone           String    @unique
+  name            String?
+  phoneVerifiedAt DateTime? @map("phone_verified_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  otpCodes OtpCode[]
+
+  @@map("users")
+}
+
+/// A single issued OTP challenge. The code itself is never stored in plaintext.
+model OtpCode {
+  id         String    @id @default(uuid())
+  phone      String
+  codeHash   String    @map("code_hash")
+  expiresAt  DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([phone, createdAt])
+  @@index([userId])
+  @@map("otp_codes")
+}

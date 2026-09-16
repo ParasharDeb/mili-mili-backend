@@ -1,0 +1,13 @@
+import { Router } from "express";
+import { adminAuthRouter } from "./admin.auth.routes.ts";
+import { userAuthRouter } from "./user.auth.routes.ts";
+import { requireAuth } from "../middleware/auth.ts";
+import { me } from "../controllers/me.controller.ts";
+
+export const apiRouter = Router();
+
+apiRouter.get("/health", (_req, res) => res.json({ status: "ok" }));
+
+apiRouter.use("/auth/admin", adminAuthRouter);
+apiRouter.use("/auth/user", userAuthRouter);
+apiRouter.get("/auth/me", requireAuth, me);
