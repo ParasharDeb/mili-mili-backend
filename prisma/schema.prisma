@@ -10,6 +10,22 @@ datasource db {
   provider = "postgresql"
 }
 
+enum SpicyEnum {
+  very_spicy
+  spicy
+  not_spicy
+  bland
+  sweet
+}
+
+enum DietPrefEnum {
+  Vegeterian
+  Non_vegeterian
+  Eggeterian
+  OnlyFish
+  Jain
+}
+
 /// Admins sign in with email + bcrypt-hashed password.
 model Admin {
   id           String   @id @default(uuid())
@@ -24,14 +40,14 @@ model Admin {
 
 /// End users sign up / sign in with a phone number + OTP. They have no password.
 model User {
-  id              String    @id @default(uuid())
-  phone           String    @unique
+  id              String       @id @default(uuid())
+  phone           String       @unique
   name            String?
-  phoneVerifiedAt DateTime? @map("phone_verified_at")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
-
-  otpCodes OtpCode[]
+  phoneVerifiedAt DateTime?    @map("phone_verified_at")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  diet_preference DietPrefEnum
+  otpCodes        OtpCode[]
 
   @@map("users")
 }
@@ -52,4 +68,51 @@ model OtpCode {
   @@index([phone, createdAt])
   @@index([userId])
   @@map("otp_codes")
+}
+
+model items {
+  id              String       @id @default(uuid())
+  name            String       @unique
+  description     String
+  price           Int
+  spicy           SpicyEnum
+  diet_preference DietPrefEnum
+}
+
+/// A menu section, e.g. "Starters". Publicly readable; admin-managed.
+model Category {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  imageUrl    String?  @map("image_url")
+  sortOrder   Int      @default(0) @map("sort_order")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  items MenuItem[]
+
+  @@index([isActive, sortOrder])
+  @@map("categories")
+}
+
+model MenuItem {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  /// Stored as exact numeric, never a float. Serialised as a 2-decimal string.
+  price       Decimal  @db.Decimal(10, 2)
+  imageUrl    String?  @map("image_url")
+  isAvailable Boolean  @default(true) @map("is_available")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  categoryId String   @map("category_id")
+  // Restrict, so deleting a category can never silently destroy its items.
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@unique([categoryId, name])
+  @@index([categoryId, isAvailable])
+  @@map("menu_items")
 }

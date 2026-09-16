@@ -5,13 +5,21 @@ import { badRequest, tooManyRequests } from "../lib/errors.ts";
 import { generateOtp, hashOtp, verifyOtpHash } from "./otp.service.ts";
 import { sendSms } from "./sms.service.ts";
 import type { RequestOtpInput, VerifyOtpInput } from "../schemas/auth.schema.ts";
+import type { DietPrefEnum } from "../../generated/prisma/enums.ts";
 
 const publicUser = (user: {
   id: string;
   phone: string;
   name: string | null;
   phoneVerifiedAt: Date | null;
-}) => ({ id: user.id, phone: user.phone, name: user.name, phoneVerifiedAt: user.phoneVerifiedAt });
+  diet_preference: DietPrefEnum;
+}) => ({
+  id: user.id,
+  phone: user.phone,
+  name: user.name,
+  phoneVerifiedAt: user.phoneVerifiedAt,
+  dietPreference: user.diet_preference,
+});
 
 export async function requestOtp({ phone }: RequestOtpInput) {
   const lastCode = await prisma.otpCode.findFirst({
@@ -51,7 +59,7 @@ export async function requestOtp({ phone }: RequestOtpInput) {
   };
 }
 
-export async function verifyOtp({ phone, code, name }: VerifyOtpInput) {
+export async function verifyOtp({ phone, code, name, dietPreference }: VerifyOtpInput) {
   const record = await prisma.otpCode.findFirst({
     where: { phone, consumedAt: null },
     orderBy: { createdAt: "desc" },
@@ -76,12 +84,29 @@ export async function verifyOtp({ phone, code, name }: VerifyOtpInput) {
   const existing = await prisma.user.findUnique({ where: { phone } });
   const isNewUser = existing === null;
 
+  // Signup needs a diet preference; returning logins keep the stored one.
+  if (isNewUser && !dietPreference) {
+    throw badRequest(
+      "dietPreference is required to complete signup",
+      "DIET_PREFERENCE_REQUIRED",
+    );
+  }
+
   const user = await prisma.$transaction(async (tx) => {
     const saved = await tx.user.upsert({
       where: { phone },
-      create: { phone, name: name ?? null, phoneVerifiedAt: new Date() },
-      // Don't clobber an existing name with an omitted one.
-      update: { phoneVerifiedAt: new Date(), ...(name ? { name } : {}) },
+      create: {
+        phone,
+        name: name ?? null,
+        phoneVerifiedAt: new Date(),
+        diet_preference: dietPreference!,
+      },
+      // Don't clobber an existing name/preference with an omitted one.
+      update: {
+        phoneVerifiedAt: new Date(),
+        ...(name ? { name } : {}),
+        ...(dietPreference ? { diet_preference: dietPreference } : {}),
+      },
     });
 
     await tx.otpCode.update({

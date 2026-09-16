@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DietPrefEnum } from "../../generated/prisma/enums.ts";
 
 /** E.164: a leading +, country code starting 1-9, then up to 14 more digits. */
 export const phoneSchema = z
@@ -28,6 +29,10 @@ export const requestOtpSchema = z.object({
   phone: phoneSchema,
 });
 
+export const dietPreferenceSchema = z.enum(DietPrefEnum, {
+  error: `Diet preference must be one of: ${Object.values(DietPrefEnum).join(", ")}`,
+});
+
 export const verifyOtpSchema = z.object({
   phone: phoneSchema,
   code: z
@@ -35,6 +40,11 @@ export const verifyOtpSchema = z.object({
     .trim()
     .regex(/^\d{6}$/, "OTP must be 6 digits"),
   name: z.string().trim().min(1).max(100).optional(),
+  /**
+   * Required on the first verify (signup) only; the service rejects a new user
+   * without one. Ignored on subsequent logins, where the stored value wins.
+   */
+  dietPreference: dietPreferenceSchema.optional(),
 });
 
 export type AdminLoginInput = z.infer<typeof adminLoginSchema>;

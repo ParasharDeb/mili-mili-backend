@@ -56,7 +56,7 @@ Signup and login are the same two calls; a user row is created on first successf
 | Method | Path | Body |
 | --- | --- | --- |
 | `POST` | `/auth/user/otp/request` | `{ phone }` |
-| `POST` | `/auth/user/otp/verify` | `{ phone, code, name? }` |
+| `POST` | `/auth/user/otp/verify` | `{ phone, code, name?, dietPreference? }` |
 
 ```bash
 curl -X POST localhost:3000/api/auth/user/otp/request \
@@ -71,6 +71,10 @@ curl -X POST localhost:3000/api/auth/user/otp/verify \
 
 Phone numbers must be E.164 (`+` country code, 8–15 digits).
 
+`dietPreference` is **required on the first verify** (signup) and ignored afterwards — an
+unrecognised phone without one gets `400 DIET_PREFERENCE_REQUIRED`. Values:
+`Vegeterian`, `Non_vegeterian`, `Eggeterian`, `OnlyFish`, `Jain`.
+
 ### Shared
 
 | Method | Path | Auth |
@@ -79,6 +83,61 @@ Phone numbers must be E.164 (`+` country code, 8–15 digits).
 | `GET` | `/auth/me` | admin or user JWT |
 
 Send the token as `Authorization: Bearer <token>`.
+
+## Menu
+
+### Public — what the user app browses
+
+No auth required.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/menu/categories` | all active categories, with `itemCount` |
+| `GET` | `/menu/categories/:id` | one category |
+| `GET` | `/menu/items` | `?categoryId=<uuid>` to filter |
+| `GET` | `/menu/items/:id` | one item |
+
+```bash
+curl localhost:3000/api/menu/categories
+# { "categories": [ { "id", "name", "slug", "description",
+#                     "imageUrl", "sortOrder", "isActive", "itemCount" } ] }
+```
+
+Inactive categories and unavailable items are hidden. An admin can pass
+`?includeInactive=true` / `?includeUnavailable=true` **with an admin token** on these same
+routes to see everything; the flags are ignored for anyone else.
+
+### Admin — dashboard writes
+
+Every route below requires `Authorization: Bearer <admin JWT>`. A user token gets `403`.
+
+| Method | Path | Body |
+| --- | --- | --- |
+| `POST` | `/admin/menu/categories` | `{ name, description?, imageUrl?, sortOrder?, isActive? }` |
+| `PATCH` | `/admin/menu/categories/:id` | any subset of the above |
+| `DELETE` | `/admin/menu/categories/:id` | — |
+| `POST` | `/admin/menu/items` | `{ name, price, categoryId, description?, imageUrl?, isAvailable? }` |
+| `PATCH` | `/admin/menu/items/:id` | any subset |
+| `DELETE` | `/admin/menu/items/:id` | — |
+
+The edit you asked for — name, price, image, description:
+
+```bash
+curl -X PATCH localhost:3000/api/admin/menu/items/$ID   -H "authorization: Bearer $ADMIN_TOKEN"   -H 'content-type: application/json'   -d '{"name":"Paneer Tikka","price":"349.00",
+       "imageUrl":"https://cdn.example.com/paneer.jpg",
+       "description":"Char-grilled, 6 pieces"}'
+```
+
+`PATCH` is a true partial update: omit a field and it is untouched; send `null` for
+`description` or `imageUrl` to clear it.
+
+### Prices
+
+Stored as `Decimal(10, 2)` and returned as a **2-decimal string** (`"349.00"`), not a number —
+floats can't hold money exactly. On input both `349` and `"349.00"` are accepted; anything with
+more than 2 decimals, negative, or in scientific notation is rejected.
+
+Deleting a category that still has items returns `409 CATEGORY_NOT_EMPTY` rather than cascading.
 
 ## OTP behaviour
 
@@ -104,7 +163,7 @@ prisma/schema.prisma         Admin, User, OtpCode
 prisma/seed.ts               creates the first admin
 src/
   app.ts                     express app factory
-  routes/                    index -> admin.auth / user.auth
+  routes/                    index -> auth (admin/user) + menu (public/admin)
   controllers/               thin: parse result -> status + json
   services/                  business logic + all DB access
   middleware/                validate (zod), auth (JWT), error
