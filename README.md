@@ -184,3 +184,40 @@ Routers mount in `src/routes/index.ts`; controllers never touch Prisma directly.
 | `bun run db:seed` | create the first admin |
 | `bun run db:studio` | Prisma Studio |
 | `bun run db:generate` | regenerate the client after schema edits |
+
+## Menu recommendations
+
+`POST /api/menu/recommend` turns one sentence of party constraints into ranked
+dish suggestions per constraint.
+
+```bash
+curl -X POST http://localhost:3000/api/menu/recommend   -H "Content-Type: application/json"   -d '{"query":"recommendations for 5 people. 2 veg, 1 non veg not spicy, 1 non veg spicy and one italian"}'
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `query` | required | The guest's request, 3-400 chars |
+| `perSlot` | 3 | Ranked options returned per constraint |
+| `includeDrinks` | false | Let every slot consider alcohol/shisha too |
+
+A single embedding cannot express "2 veg AND 1 spicy non-veg", so the request is
+split into **slots**, one per stated constraint. Each slot is embedded and queried
+against Pinecone with its own metadata filter, then slots are filled
+scarcity-first so a thin constraint is not starved by a greedier one.
+
+`count` (guests covered) and `recommendations.length` (options offered) are
+different numbers; "2 veg" means two guests choosing from three suggestions.
+
+Notes worth knowing:
+
+- **Diet filters are never relaxed.** When a slot cannot be filled the response
+  carries `SLOT_NO_MATCHES` and an empty list rather than substituting something
+  off-constraint. Everything else (spice band, then cuisine, then course) is
+  relaxed one rung at a time and reported in `relaxations`.
+- Results are re-verified against Postgres after retrieval. Pinecone metadata is
+  only a snapshot that refreshes when someone re-runs `python ingest.py`, so an
+  item edited in the database would otherwise keep matching its old filter.
+- The keys are optional. Without `MISTRAL_API_KEY` / `PINECONE_API_KEY` the server
+  still boots and only this route returns 503 `RECO_UNCONFIGURED`.
+- If Mistral is unreachable the query falls back to a regex parser; the response
+  reports which was used in `meta.parseMode`.
