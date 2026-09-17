@@ -45,3 +45,28 @@ export const recommendSchema = z.object({
 export type Slot = z.infer<typeof slotSchema>;
 export type SlotPlan = z.infer<typeof slotPlanSchema>;
 export type RecommendInput = z.infer<typeof recommendSchema>;
+
+/** GET /api/menu/items */
+export const listItemsSchema = z.object({
+  group: z.enum(["food", "drink", "all"]).default("food"),
+  course: z.enum([
+    "Starter", "MainCourse", "Bread", "Salad", "Dessert",
+    "Beverage", "Alcohol", "Shisha", "Sides",
+  ]).optional(),
+  diet: z.enum(["veg", "nonveg", "any"]).default("any"),
+  q: z.string().trim().min(1).max(80).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(500),
+});
+
+/**
+ * POST /api/menu/chat -- one door for the chat UI. The backend decides whether a
+ * message is a party request or a question, so the frontend does not have to.
+ */
+export const chatSchema = z.object({
+  message: z.string().trim().min(1, "Say something").max(400),
+  perSlot: z.coerce.number().int().min(1).max(5).default(3),
+  includeDrinks: z.boolean().default(false),
+});
+
+export type ListItemsInput = z.infer<typeof listItemsSchema>;
+export type ChatInput = z.infer<typeof chatSchema>;

@@ -3,7 +3,7 @@ import { env, isRecoConfigured } from "../lib/env.ts";
 import { AppError } from "../lib/errors.ts";
 import { embed } from "../lib/mistral.ts";
 import { queryItems, type ItemMatch } from "../lib/pinecone.ts";
-import type { RecommendInput, Slot } from "../schemas/menu.schema.ts";
+import type { RecommendInput, Slot, SlotPlan } from "../schemas/menu.schema.ts";
 import {
   allowedCourses,
   buildFilter,
@@ -47,7 +47,14 @@ function countClauses(slot: Slot): number {
 
 type Assignment = { slotIndex: number; matches: ItemMatch[]; relaxations: Relaxation[] };
 
-export async function recommend(input: RecommendInput) {
+export type ParsedQuery = { plan: SlotPlan; mode: "llm" | "heuristic" };
+
+/**
+ * `pre` lets a caller that has already parsed the sentence (the chat dispatcher,
+ * which parses to decide whether this is even a recommendation) pass the result
+ * in rather than paying for a second LLM round-trip.
+ */
+export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
   if (!isRecoConfigured) {
     throw new AppError(
       503,
@@ -57,7 +64,7 @@ export async function recommend(input: RecommendInput) {
   }
 
   const started = Date.now();
-  const { plan, mode } = await parseQuery(input.query);
+  const { plan, mode } = pre ?? (await parseQuery(input.query));
   const warnings: { code: string; slotId?: string; message: string }[] = [];
 
   if (plan.slots.length === 0) {

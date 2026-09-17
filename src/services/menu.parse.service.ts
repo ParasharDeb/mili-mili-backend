@@ -25,6 +25,9 @@ RULES
 3. courseGroup is "food" unless the guest explicitly asked for drinks, cocktails,
    wine, beer, mocktails or shisha, in which case "drink".
 4. searchText describes the dish the way a diner would. Never mention JSON or filters.
+5. If the guest is ASKING ABOUT a dish rather than asking you to suggest one --
+   "what is in X", "is X spicy", "does X have nuts", "tell me about X" -- that is a
+   question, not a constraint. Return {"partySize":0,"slots":[]} for those.
 
 EXAMPLE
 Guest: "recommendations for 5 people. 2 veg, 1 non veg not spicy, 1 non veg spicy and one italian"
@@ -33,6 +36,15 @@ Guest: "recommendations for 5 people. 2 veg, 1 non veg not spicy, 1 non veg spic
 {"label":"1 non-veg, mild","count":1,"diet":"nonveg","spice":"none","cuisine":"any","course":"any","courseGroup":"food","searchText":"non-vegetarian dish that is not spicy"},
 {"label":"1 non-veg, spicy","count":1,"diet":"nonveg","spice":"spicy","cuisine":"any","course":"any","courseGroup":"food","searchText":"spicy non-vegetarian dish"},
 {"label":"1 Italian","count":1,"diet":"any","spice":"any","cuisine":"Italian","course":"any","courseGroup":"food","searchText":"italian pasta or pizza"}]}
+
+EXAMPLE
+Guest: "what is in the butter naan?"
+{"partySize":0,"slots":[]}
+
+EXAMPLE
+Guest: "what should we order for four?"
+{"partySize":4,"slots":[
+{"label":"4 guests","count":4,"diet":"any","spice":"any","cuisine":"any","course":"any","courseGroup":"food","searchText":"popular dish to share"}]}
 
 EXAMPLE
 Guest: "table for 3, one jain, and a couple of cocktails"

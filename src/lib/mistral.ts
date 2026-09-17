@@ -98,3 +98,18 @@ export async function chatJson(messages: ChatMessage[]): Promise<unknown> {
     throw new AppError(502, "Mistral returned malformed JSON", "MISTRAL_BAD_JSON");
   }
 }
+
+/** Chat completion returning prose. Used for the menu Q&A answers. */
+export async function chatText(messages: ChatMessage[], maxTokens = 400): Promise<string> {
+  const json = await call(
+    "/v1/chat/completions",
+    { model: env.MISTRAL_CHAT_MODEL, messages, temperature: 0.2, max_tokens: maxTokens },
+    env.RECO_TIMEOUT_MS,
+  );
+
+  const content = json.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    throw new AppError(502, "Mistral returned no content", "MISTRAL_EMPTY_RESPONSE");
+  }
+  return content.trim();
+}
