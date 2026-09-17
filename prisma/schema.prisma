@@ -26,6 +26,38 @@ enum DietPrefEnum {
   Jain
 }
 
+enum CuisineEnum {
+  Indian
+  Asian
+  Italian
+  Continental
+  Beverage
+  Other
+}
+
+enum CourseEnum {
+  Starter
+  MainCourse
+  Bread
+  Salad
+  Dessert
+  Beverage
+  Alcohol
+  Shisha
+  Sides
+}
+
+enum ProteinEnum {
+  Chicken
+  Mutton
+  Fish
+  Prawns
+  Egg
+  Paneer
+  Tofu
+  None
+}
+
 /// Admins sign in with email + bcrypt-hashed password.
 model Admin {
   id           String   @id @default(uuid())
@@ -70,13 +102,23 @@ model OtpCode {
   @@map("otp_codes")
 }
 
-model items {
-  id              String       @id @default(uuid())
-  name            String       @unique
-  description     String
-  price           Int
-  spicy           SpicyEnum
-  diet_preference DietPrefEnum
+model Item {
+  id        String       @id @default(uuid())
+  name      String
+  desc      String?
+  cuisine   CuisineEnum
+  course    CourseEnum
+  diet      DietPrefEnum
+  allergens String?
+  protein   ProteinEnum  @default(None)
+  /// 0 (not spicy) to 5 (very spicy)
+  spice     Int          @default(0)
+  tasteTags String[]     @map("taste_tags")
+  serves    Int[]        @default([1])
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  @@map("items")
 }
 
 /// A menu section, e.g. "Starters". Publicly readable; admin-managed.
