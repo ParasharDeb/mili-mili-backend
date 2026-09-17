@@ -113,6 +113,9 @@ model Item {
   protein   ProteinEnum  @default(None)
   /// 0 (not spicy) to 5 (very spicy)
   spice     Int          @default(0)
+  /// 0..1 confidence in `spice`. Null means never assessed — distinct from a
+  /// confident 0, which the heuristic classifier could not express.
+  spiceConfidence Float? @map("spice_confidence")
   tasteTags String[]     @map("taste_tags")
   serves    Int[]        @default([1])
   createdAt DateTime     @default(now()) @map("created_at")
