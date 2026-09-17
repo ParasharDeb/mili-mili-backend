@@ -70,3 +70,15 @@ export const chatSchema = z.object({
 
 export type ListItemsInput = z.infer<typeof listItemsSchema>;
 export type ChatInput = z.infer<typeof chatSchema>;
+
+/** GET /api/menu/items/:id/pairings */
+export const idParamSchema = z.object({
+  id: z.string().uuid("Invalid id"),
+});
+
+export const pairingsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(10).default(3),
+});
+
+export type IdParam = z.infer<typeof idParamSchema>;
+export type PairingsQueryInput = z.infer<typeof pairingsQuerySchema>;

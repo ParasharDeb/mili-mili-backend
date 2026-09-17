@@ -2,10 +2,12 @@ import type { Request, Response } from "express";
 import type {
   ChatInput,
   ListItemsInput,
+  PairingsQueryInput,
   RecommendInput,
 } from "../schemas/menu.schema.ts";
 import * as chatService from "../services/menu.chat.service.ts";
 import * as items from "../services/menu.items.service.ts";
+import * as pairingService from "../services/menu.pairing.service.ts";
 import * as reco from "../services/menu.recommend.service.ts";
 
 export async function recommend(req: Request, res: Response) {
@@ -26,4 +28,11 @@ export async function list(req: Request, res: Response) {
 
 export async function stats(_req: Request, res: Response) {
   res.json(await items.itemStats());
+}
+
+/** What goes well with this dish, or -- for a drink -- what goes well with it. */
+export async function pairings(req: Request, res: Response) {
+  const { id } = req.params as { id: string };
+  const { limit } = req.validatedQuery as PairingsQueryInput;
+  res.json(await pairingService.pairings(id, limit));
 }

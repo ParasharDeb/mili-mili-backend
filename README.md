@@ -221,3 +221,27 @@ Notes worth knowing:
   still boots and only this route returns 503 `RECO_UNCONFIGURED`.
 - If Mistral is unreachable the query falls back to a regex parser; the response
   reports which was used in `meta.parseMode`.
+
+### Pairings — "what goes with this?"
+
+`GET /api/menu/items/:id/pairings?limit=3` takes one item (the dish you just
+ordered, or the drink you just picked) and returns the best matches from the
+*other* side of the menu — dish in, drinks out; drink in, dishes out. Direction
+is inferred from the item's own `course`, not passed in.
+
+```bash
+curl "http://localhost:3000/api/menu/items/$ITEM_ID/pairings?limit=3"
+# { "item", "direction": "food_to_drink" | "drink_to_food",
+#   "pairings": [ { "rank", "score", "why", "item" } ], "meta" }
+```
+
+Ranking blends two signals: Pinecone semantic similarity (embeds the item's own
+name/desc/tags, same embedding space `python ingest.py` writes) and a small
+deterministic flavour-affinity table over `spice` / `tasteTags` / `protein` —
+spicy wants something cooling, rich/creamy wants something to cut it, smoky
+echoes smoky, dessert wants sweet. `why` is generated from that table, not an
+LLM call, for the same hallucination-risk reason as `recommend`'s `explain()`.
+
+`Shisha` items return `422 PAIRING_NOT_SUPPORTED` — hookah pairing isn't
+modelled. An unknown id is `404 ITEM_NOT_FOUND`; an unconfigured Mistral/Pinecone
+is `503 RECO_UNCONFIGURED`, same as `/recommend`.
