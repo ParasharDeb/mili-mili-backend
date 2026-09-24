@@ -1,10 +1,14 @@
 import { z } from "zod";
+import { DRINK_STYLES } from "../domain/abv.ts";
 
 /**
- * The LLM is never asked to spell the Prisma diet enum. `DietPrefEnum` is
- * misspelled in schema.prisma (`Vegeterian`, `Non_vegeterian`), and a model told
- * to emit those tokens "corrects" them a fair share of the time. It answers in
- * diner language and menu.filter.ts maps to the DB spelling.
+ * Slots speak diner language, never the Prisma enum.
+ *
+ * This started as a workaround -- `DietPrefEnum` was misspelled (`Vegeterian`,
+ * `Non_vegeterian`) and a model told to emit those tokens "corrected" them a
+ * fair share of the time. The spelling is fixed now, but the indirection stays:
+ * "veg"/"nonveg" is what a guest types and what a classifier is reliable at
+ * returning. menu.filter.ts maps to the DB spelling.
  */
 export const dietSlotSchema = z.enum(["veg", "nonveg", "egg", "fish", "jain", "any"]);
 export const spiceSlotSchema = z.enum(["none", "mild", "medium", "spicy", "very_spicy", "any"]);
@@ -15,6 +19,7 @@ export const courseSlotSchema = z.enum([
   "Starter", "MainCourse", "Bread", "Salad", "Dessert",
   "Beverage", "Alcohol", "Shisha", "Sides", "any",
 ]);
+export const strengthSlotSchema = z.enum(["light", "medium", "strong", "any"]);
 /** Coarse food/drink intent, used when no specific course was stated. */
 export const courseGroupSchema = z.enum(["food", "drink", "any"]);
 
@@ -27,6 +32,21 @@ export const slotSchema = z.object({
   course: courseSlotSchema,
   courseGroup: courseGroupSchema,
   searchText: z.string().trim().min(1).max(160),
+  /**
+   * Set by the `cuisine_softened` relaxation rung: the cuisine the guest asked
+   * for, after the hard filter on it was dropped. The ranker still prefers it,
+   * which is how a softened preference survives without an embedding to carry it.
+   */
+  softenedCuisine: cuisineSlotSchema.optional(),
+  /**
+   * How strong a drink the guest asked for, and any explicit % ABV bounds
+   * ("under 15%"). Only meaningful for bar items; see src/domain/abv.ts.
+   */
+  strength: strengthSlotSchema.optional(),
+  abvMin: z.number().min(0).max(100).optional(),
+  abvMax: z.number().min(0).max(100).optional(),
+  /** The kind of drink named: "a beer", "a cocktail", "whisky". "spirit" means any spirit. */
+  drinkStyle: z.enum(DRINK_STYLES).optional(),
 });
 
 export const slotPlanSchema = z.object({
@@ -55,6 +75,12 @@ export const listItemsSchema = z.object({
   ]).optional(),
   diet: z.enum(["veg", "nonveg", "any"]).default("any"),
   q: z.string().trim().min(1).max(80).optional(),
+  /** Rupees. Only meaningful now that `items` carries a price. */
+  maxPrice: z.coerce.number().positive().max(1_000_000).optional(),
+  /** Matches dishes whose largest portion covers this many people. */
+  partySize: z.coerce.number().int().min(1).max(50).optional(),
+  /** A POS merchandising tag: bestseller, trending, chefs-special... */
+  tag: z.string().trim().min(1).max(40).optional(),
   limit: z.coerce.number().int().min(1).max(500).default(500),
 });
 

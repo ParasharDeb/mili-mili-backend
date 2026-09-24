@@ -1,9 +1,7 @@
 import { prisma } from "../../db/index.ts";
-import { env, isRecoConfigured } from "../lib/env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
-import { embed } from "../lib/mistral.ts";
-import { queryItems } from "../lib/pinecone.ts";
 import { FOOD_COURSES, toPublicItem, type PublicItem } from "./menu.items.service.ts";
+import { findPairingCandidates } from "./menu.sql.service.ts";
 
 /**
  * Food <-> drink pairing for a single item ("I ordered the butter chicken, what
@@ -23,7 +21,22 @@ import { FOOD_COURSES, toPublicItem, type PublicItem } from "./menu.items.servic
 
 const PAIR_DRINK_COURSES = ["Alcohol", "Beverage"];
 
-type ItemRow = NonNullable<Awaited<ReturnType<typeof prisma.item.findUnique>>>;
+/**
+ * Structural, not `typeof prisma.item.findUnique`: the source dish comes from
+ * Prisma but the candidates now come from menu.sql.service.ts as PublicItems,
+ * and both satisfy this.
+ */
+type ItemRow = {
+  name: string;
+  desc: string | null;
+  course: string;
+  cuisine: string;
+  diet: string;
+  protein: string;
+  spice: number;
+  spiceConfidence: number | null;
+  tasteTags: string[];
+};
 
 /** Pairs well with -> the tags on the other side worth boosting for. */
 const AFFINITY: Record<string, string[]> = {
@@ -162,18 +175,10 @@ export type PairingResult = {
   item: PublicItem;
   direction: "food_to_drink" | "drink_to_food";
   pairings: { rank: number; score: number; why: string; item: PublicItem }[];
-  meta: { tookMs: number; embedModel: string };
+  meta: { tookMs: number };
 };
 
 export async function pairings(itemId: string, limit: number): Promise<PairingResult> {
-  if (!isRecoConfigured) {
-    throw new AppError(
-      503,
-      "Recommendations are not configured. Set MISTRAL_API_KEY and PINECONE_API_KEY.",
-      "RECO_UNCONFIGURED",
-    );
-  }
-
   const started = Date.now();
   const item = await prisma.item.findUnique({ where: { id: itemId } });
   if (!item) throw notFound("Item not found", "ITEM_NOT_FOUND");
@@ -191,25 +196,25 @@ export async function pairings(itemId: string, limit: number): Promise<PairingRe
   const direction: PairingResult["direction"] = isFood ? "food_to_drink" : "drink_to_food";
   const targetCourses = isFood ? PAIR_DRINK_COURSES : [...FOOD_COURSES];
 
-  const [vector] = await embed([pairingText(item)]);
-  const matches = await queryItems(vector!, { course: { $in: targetCourses } }, Math.max(20, limit * 6));
-
-  const rows = await prisma.item.findMany({ where: { id: { in: matches.map((m) => m.id) } } });
-  const byId = new Map(rows.map((r) => [r.id, r]));
+  const candidates = await findPairingCandidates(targetCourses, item.id);
   const sourceTags = flavorTags(item);
 
-  const scored = matches
-    .map((m) => {
-      const row = byId.get(m.id);
-      if (!row) return null;
+  // The embedding term is gone with Pinecone, and it did real work here: it
+  // carried world knowledge a tag table cannot ("Laphroaig" reads as smoky even
+  // from a bare product name). What is left is the deterministic half, so the
+  // affinity table now decides the ranking outright and popularity breaks ties.
+  // Plain spirits, which the enrichment leaves almost tag-less, pair worst --
+  // that is a known and accepted regression, not an oversight.
+  const scored = candidates
+    .map((row) => {
       const { score: affinity, reasons } = affinityScore(sourceTags, flavorTags(row));
-      // Semantic similarity carries most of the weight; the affinity table is a
-      // rerank on top of it, not a replacement -- it only ever nudges within the
-      // set Pinecone already thought was relevant.
-      return { row, finalScore: 0.55 * m.score + 0.45 * affinity, reasons };
+      return {
+        row,
+        finalScore: 0.85 * affinity + 0.15 * (row.tags.includes("bestseller") ? 1 : 0),
+        reasons,
+      };
     })
-    .filter((x): x is NonNullable<typeof x> => x !== null)
-    .sort((a, b) => b.finalScore - a.finalScore);
+    .sort((a, b) => b.finalScore - a.finalScore || a.row.name.localeCompare(b.row.name));
 
   const usedNames = new Set<string>();
   const picked: typeof scored = [];
@@ -228,8 +233,8 @@ export async function pairings(itemId: string, limit: number): Promise<PairingRe
       rank: i + 1,
       score: Number(p.finalScore.toFixed(4)),
       why: explainPairing(p.reasons, p.row),
-      item: toPublicItem(p.row),
+      item: p.row,
     })),
-    meta: { tookMs: Date.now() - started, embedModel: env.MISTRAL_EMBED_MODEL },
+    meta: { tookMs: Date.now() - started },
   };
 }

@@ -1,12 +1,12 @@
-import { prisma } from "../../db/index.ts";
 import { env } from "../lib/env.ts";
-import { chatText, embed } from "../lib/mistral.ts";
-import { queryItems } from "../lib/pinecone.ts";
-import { toPublicItem, type PublicItem } from "./menu.items.service.ts";
+import { chatText } from "../lib/mistral.ts";
+import { SPICE_MIN_CONFIDENCE } from "../domain/menu.constants.ts";
+import { findByName, searchItems } from "./menu.sql.service.ts";
+import type { PublicItem } from "./menu.items.service.ts";
 
 /**
- * Retrieval-augmented answering for menu questions that are not party
- * recommendations -- "what is in the biryani", "anything without dairy".
+ * Grounded answering for menu questions -- "what is in the biryani", "anything
+ * without dairy".
  *
  * The model only ever sees dishes we retrieved, and is told to say so when the
  * answer is not among them. Inventing a dish on a restaurant menu is worse than
@@ -23,8 +23,10 @@ Answer ONLY from the dishes listed in the context. Rules:
 - Refer to dishes by their exact name from the context.
 - Spice is on a 0 to 5 scale. Where a dish shows "spice unconfirmed", do not state
   a heat level -- say it is not recorded.
-- For allergen questions, answer from the listed tags only, and add that the
-  kitchen should confirm before ordering.`;
+- You may quote a price when the context gives one, exactly as written.
+- For allergen questions: the tags shown are merchandising labels, not a verified
+  allergen list. Say what the menu records, and add that the kitchen should
+  confirm before ordering.`;
 
 function renderContext(items: PublicItem[]): string {
   return items
@@ -34,47 +36,67 @@ function renderContext(items: PublicItem[]): string {
         i.diet,
         i.cuisine,
         i.course,
-        i.spiceConfidence != null && i.spiceConfidence >= 0.5
+        i.spiceConfidence != null && i.spiceConfidence >= SPICE_MIN_CONFIDENCE
           ? `spice ${i.spice}/5`
           : "spice unconfirmed",
       ];
+      if (i.price != null) bits.push(`₹${Math.round(i.price)}`);
+      if (i.servesMax > 1) bits.push(`serves ${i.servesMin}-${i.servesMax}`);
       if (i.tasteTags.length) bits.push(`tastes ${i.tasteTags.join(", ")}`);
-      if (i.allergens) bits.push(`tags: ${i.allergens}`);
+      if (i.tags.length) bits.push(`menu tags: ${i.tags.join(", ")}`);
       return `- ${i.name} (${bits.join("; ")})`;
     })
     .join("\n");
 }
 
-export async function ask(question: string): Promise<{
-  answer: string;
-  dishes: PublicItem[];
-  chips: string[];
-}> {
-  const [vector] = await embed([question]);
-  const matches = await queryItems(vector!, undefined, 8);
+/**
+ * `named` is the dish the router believes the guest mentioned by name.
+ *
+ * Retrieval used to be an unfiltered top-8 vector query, which meant "what is in
+ * the butter naan" was answered from eight dishes that merely read similarly.
+ * An exact name match now leads the context, so the dish the guest asked about
+ * is always in it.
+ */
+export async function ask(
+  question: string,
+  opts: { named?: boolean; includeDrinks?: boolean } = {},
+): Promise<{ answer: string; dishes: PublicItem[]; chips: string[] }> {
+  const dishes: PublicItem[] = [];
+  const seen = new Set<string>();
 
-  if (matches.length === 0) {
+  if (opts.named !== false) {
+    for (const match of await findByName(question, { limit: 3 })) {
+      if (!seen.has(match.item.id)) {
+        seen.add(match.item.id);
+        dishes.push(match.item);
+      }
+    }
+  }
+
+  for (const item of await searchItems(question, {
+    limit: 8,
+    includeDrinks: opts.includeDrinks,
+  })) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      dishes.push(item);
+    }
+  }
+
+  if (dishes.length === 0) {
     return {
-      answer: "I could not find anything on tonight's menu that matches. Try naming a dish, or tell me what you feel like eating.",
+      answer:
+        "I could not find anything on tonight's menu that matches. Try naming a dish, or tell me what you feel like eating.",
       dishes: [],
       chips: ["What is vegetarian?", "Something spicy", "What should we order for four?"],
     };
   }
 
-  const rows = await prisma.item.findMany({ where: { id: { in: matches.map((m) => m.id) } } });
-  const byId = new Map(rows.map((r) => [r.id, r]));
-
-  // Keep Pinecone's ranking; findMany returns arbitrary order.
-  const dishes = matches
-    .map((m) => byId.get(m.id))
-    .filter((r): r is NonNullable<typeof r> => Boolean(r))
-    .map(toPublicItem);
-
   const answer = await chatText([
     { role: "system", content: SYSTEM_PROMPT },
     {
       role: "user",
-      content: `Dishes on the menu that may be relevant:\n${renderContext(dishes)}\n\nGuest asks: ${question}`,
+      content: `Dishes on the menu that may be relevant:\n${renderContext(dishes.slice(0, 10))}\n\nGuest asks: ${question}`,
     },
   ]);
 
@@ -90,7 +112,7 @@ function buildChips(dishes: PublicItem[]): string[] {
   const chips: string[] = [];
   const first = dishes[0];
   if (first) chips.push(`Is ${first.name} spicy?`);
-  if (dishes.some((d) => d.diet === "Vegeterian")) chips.push("What else is vegetarian?");
+  if (dishes.some((d) => d.diet === "Vegetarian")) chips.push("What else is vegetarian?");
   chips.push("What should we order for four?");
   return chips.slice(0, 3);
 }

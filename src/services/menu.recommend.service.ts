@@ -1,38 +1,42 @@
-import { prisma } from "../../db/index.ts";
-import { env, isRecoConfigured } from "../lib/env.ts";
-import { AppError } from "../lib/errors.ts";
-import { embed } from "../lib/mistral.ts";
-import { queryItems, type ItemMatch } from "../lib/pinecone.ts";
+import { env } from "../lib/env.ts";
 import type { RecommendInput, Slot, SlotPlan } from "../schemas/menu.schema.ts";
+import { DIET_WORDS, SPICE_MIN_CONFIDENCE, SPICE_WORDS } from "../domain/menu.constants.ts";
 import {
+  abvAllows,
   allowedCourses,
-  buildFilter,
   dietAllows,
   relaxSlot,
   RELAXATIONS,
   type Relaxation,
 } from "./menu.filter.ts";
-import { parseQuery } from "./menu.parse.service.ts";
+import { findCandidates, type CandidateRow } from "./menu.sql.service.ts";
 
-const SPICE_WORDS = ["not spicy", "very mild", "mild", "medium spicy", "hot", "very spicy"];
+/**
+ * Multi-slot constrained retrieval.
+ *
+ * The structure here -- scarcity-first assignment, global dedupe, a relaxation
+ * ladder that never touches diet -- is unchanged from when candidates came from
+ * a vector index. Only the source changed: `findCandidates` runs SQL against
+ * Postgres and returns fully hydrated, already-scored rows, so there is no
+ * separate hydrate step and no stale-metadata class of bug to guard against.
+ */
 
-const DIET_WORDS: Record<string, string> = {
-  Vegeterian: "Vegetarian",
-  Non_vegeterian: "Non-vegetarian",
-  Eggeterian: "Eggetarian",
-  OnlyFish: "Pescatarian",
-  Jain: "Jain",
-};
-
-type Row = Awaited<ReturnType<typeof prisma.item.findMany>>[number];
-
-/** A short deterministic explanation. An LLM call here would cost latency and invite hallucination. */
-function explain(row: Row): string {
+/** A short deterministic explanation. An LLM here would cost latency and invite hallucination. */
+function explain(row: CandidateRow): string {
   const bits = [DIET_WORDS[row.diet] ?? row.diet];
-  if (row.spiceConfidence != null && row.spiceConfidence >= 0.5) {
+  if (row.spiceConfidence != null && row.spiceConfidence >= SPICE_MIN_CONFIDENCE) {
     bits.push(SPICE_WORDS[row.spice] ?? "medium spicy");
   }
-  bits.push(row.cuisine, row.course);
+  if (row.course === "Alcohol" || row.course === "Beverage") {
+    // Drinks: the cuisine column just says "Beverage", and strength is the fact
+    // a guest choosing between them actually wants.
+    bits.length = 0;
+    bits.push(row.course === "Alcohol" ? "Alcoholic" : "Non-alcoholic");
+    if (row.course === "Alcohol" && row.abv != null) bits.push(`~${row.abv}% ABV`);
+  } else {
+    bits.push(row.cuisine, row.course);
+  }
+  if (row.price != null) bits.push(`₹${Math.round(row.price)}`);
   return bits.join(" · ");
 }
 
@@ -45,26 +49,13 @@ function countClauses(slot: Slot): number {
   return [slot.diet, slot.spice, slot.cuisine, slot.course].filter((v) => v !== "any").length;
 }
 
-type Assignment = { slotIndex: number; matches: ItemMatch[]; relaxations: Relaxation[] };
+type Assignment = { slotIndex: number; matches: CandidateRow[]; relaxations: Relaxation[] };
 
-export type ParsedQuery = { plan: SlotPlan; mode: "llm" | "heuristic" };
+export type ParsedQuery = { plan: SlotPlan; mode: "jev" | "heuristic" };
 
-/**
- * `pre` lets a caller that has already parsed the sentence (the chat dispatcher,
- * which parses to decide whether this is even a recommendation) pass the result
- * in rather than paying for a second LLM round-trip.
- */
-export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
-  if (!isRecoConfigured) {
-    throw new AppError(
-      503,
-      "Recommendations are not configured. Set MISTRAL_API_KEY and PINECONE_API_KEY.",
-      "RECO_UNCONFIGURED",
-    );
-  }
-
+export async function recommend(input: RecommendInput, pre: ParsedQuery) {
   const started = Date.now();
-  const { plan, mode } = pre ?? (await parseQuery(input.query));
+  const { plan, mode } = pre;
   const warnings: { code: string; slotId?: string; message: string }[] = [];
 
   if (plan.slots.length === 0) {
@@ -77,7 +68,7 @@ export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
         code: "NO_CONSTRAINTS_FOUND",
         message: "No dietary or cuisine constraints were found in that request.",
       }],
-      meta: { parseMode: mode, tookMs: Date.now() - started },
+      meta: { slotMode: mode, tookMs: Date.now() - started },
     };
   }
 
@@ -89,19 +80,19 @@ export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
     });
   }
 
-  // One embeddings call for every slot -- the API takes an array.
-  const vectors = await embed(slots.map((s) => s.searchText));
-
   const candidateSets = await Promise.all(
-    slots.map((slot, i) =>
-      queryItems(vectors[i]!, buildFilter(slot, input.includeDrinks), env.RECO_CANDIDATE_TOPK),
+    slots.map((slot) =>
+      findCandidates(slot, {
+        includeDrinks: input.includeDrinks,
+        limit: env.RECO_CANDIDATE_TOPK,
+      }),
     ),
   );
 
   // Fetch in parallel, assign sequentially. Scarcity first, so a thin constraint
   // ("non veg spicy") is not starved by a greedy earlier slot taking its dishes.
-  // When Pinecone returns fewer than topK, that IS the complete eligible set,
-  // which makes this an exact scarcity measure rather than a guess.
+  // With SQL and a limit above the table size, the candidate count IS the
+  // complete eligible set -- an exact scarcity measure, not an estimate.
   const order = slots
     .map((_, i) => i)
     .sort((a, b) =>
@@ -114,7 +105,7 @@ export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
   const usedNames = new Set<string>();
   const assignments = new Map<number, Assignment>();
 
-  const take = (pool: ItemMatch[], into: ItemMatch[], want: number) => {
+  const take = (pool: CandidateRow[], into: CandidateRow[], want: number) => {
     for (const m of pool) {
       if (into.length >= want) break;
       const nk = nameKey(m.name);
@@ -127,7 +118,7 @@ export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
 
   for (const i of order) {
     const slot = slots[i]!;
-    const picked: ItemMatch[] = [];
+    const picked: CandidateRow[] = [];
     const relaxations: Relaxation[] = [];
 
     take(candidateSets[i]!, picked, input.perSlot);
@@ -138,11 +129,10 @@ export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
       const relaxed = relaxSlot(slot, rung);
       if (!relaxed) continue;
 
-      const more = await queryItems(
-        vectors[i]!,
-        buildFilter(relaxed, input.includeDrinks),
-        env.RECO_CANDIDATE_TOPK,
-      );
+      const more = await findCandidates(relaxed, {
+        includeDrinks: input.includeDrinks,
+        limit: env.RECO_CANDIDATE_TOPK,
+      });
       const before = picked.length;
       take(more, picked, input.perSlot);
       if (picked.length > before) relaxations.push(rung);
@@ -151,51 +141,41 @@ export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
     assignments.set(i, { slotIndex: i, matches: picked, relaxations });
   }
 
-  // Hydrate every candidate at once; Postgres is the truth, Pinecone is a cache.
-  const ids = [...new Set([...assignments.values()].flatMap((a) => a.matches.map((m) => m.id)))];
-  const rows = await prisma.item.findMany({ where: { id: { in: ids } } });
-  const byId = new Map(rows.map((r) => [r.id, r]));
-
   const groups = slots.map((slot, i) => {
     const assignment = assignments.get(i)!;
     const recommendations = [];
 
-    for (const match of assignment.matches) {
-      const row = byId.get(match.id);
-      if (!row) {
-        // Vector outlived its row. Real case: nothing re-embeds on item delete.
-        console.warn(`[recommend] vector ${match.id} has no Postgres row; dropping`);
-        continue;
-      }
-      // Re-check the promise we actually made, against live data.
+    for (const row of assignment.matches) {
+      // Re-check the promise we actually made. The query built this set, so this
+      // should be tautological -- which is the point: it is the last line of
+      // defence against a bug in the filter, and it costs nothing.
       if (!dietAllows(slot.diet, row.diet)) {
         console.warn(
-          `[recommend] stale Pinecone metadata: ${row.name} (${row.id}) is ${row.diet} ` +
-            `but matched a '${slot.diet}' slot. Re-run python ingest.py.`,
+          `[recommend] ${row.name} (${row.id}) is ${row.diet} but matched a ` +
+            `'${slot.diet}' slot. This is a bug in menu.filter.ts or menu.sql.service.ts.`,
         );
         continue;
       }
       const courses = allowedCourses(slot, input.includeDrinks);
       if (courses && !courses.includes(row.course)) continue;
+      // Alcoholic vs non-alcoholic is always re-checked; the % bounds and the
+      // style only if they were not deliberately relaxed away.
+      const relaxed = assignment.relaxations;
+      const checked = {
+        ...slot,
+        ...(relaxed.includes("strength_dropped")
+          ? { strength: "any" as const, abvMin: undefined, abvMax: undefined }
+          : relaxed.includes("strength_widened") ? relaxSlot(slot, "strength_widened") ?? {} : {}),
+        ...(relaxed.includes("style_dropped") ? { drinkStyle: undefined } : {}),
+      };
+      if (!abvAllows(checked, row.abv, row.drinkStyle)) continue;
 
+      const { score, signals, popularity, ...item } = row;
       recommendations.push({
         rank: recommendations.length + 1,
-        score: Number(match.score.toFixed(4)),
+        score: Number(score.toFixed(4)),
         why: explain(row),
-        item: {
-          id: row.id,
-          name: row.name,
-          desc: row.desc,
-          cuisine: row.cuisine,
-          course: row.course,
-          diet: row.diet,
-          protein: row.protein,
-          spice: row.spice,
-          spiceConfidence: row.spiceConfidence,
-          tasteTags: row.tasteTags,
-          serves: row.serves,
-          allergens: row.allergens,
-        },
+        item,
       });
     }
 
@@ -259,9 +239,8 @@ export async function recommend(input: RecommendInput, pre?: ParsedQuery) {
     groups,
     warnings,
     meta: {
-      parseMode: mode,
+      slotMode: mode,
       chatModel: env.MISTRAL_CHAT_MODEL,
-      embedModel: env.MISTRAL_EMBED_MODEL,
       tookMs: Date.now() - started,
     },
   };

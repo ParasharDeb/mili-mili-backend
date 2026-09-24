@@ -13,10 +13,10 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@pinecone-database/pinecone": "^9.0.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "7.10.0",
     "@types/express": "^5.0.6",
+    "@typesafe-ai/sdk": "^0.6.0",
     "bcrypt": "^6.0.0",
     "express": "^5.2.1",
     "jose": "^6.2.12",
@@ -31,6 +31,9 @@
     "db:studio": "prisma studio",
     "db:seed": "bun run prisma/seed.ts",
     "db:seed:items": "bun run prisma/seedItems.ts",
-    "start": "bun run index.ts"
+    "db:seed:menu": "bun run prisma/seedMenu.ts",
+    "start": "bun run index.ts",
+    "db:enrich": "bun run prisma/enrich.ts",
+    "db:rules": "bun run prisma/enrich.ts --rules-only"
   }
 }

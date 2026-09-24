@@ -2,26 +2,20 @@
 // Datasource URL is configured in prisma7.config.ts (reads DIRECT_URL).
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider        = "prisma-client"
+  output          = "../generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-}
-
-enum SpicyEnum {
-  very_spicy
-  spicy
-  not_spicy
-  bland
-  sweet
+  provider   = "postgresql"
+  extensions = [pg_trgm]
 }
 
 enum DietPrefEnum {
-  Vegeterian
-  Non_vegeterian
-  Eggeterian
+  Vegetarian
+  NonVegetarian
+  Eggetarian
   OnlyFish
   Jain
 }
@@ -56,6 +50,16 @@ enum ProteinEnum {
   Paneer
   Tofu
   None
+}
+
+/// Where a derived attribute came from. `spice` is the one field with no
+/// deterministic source -- a POS export never carries it -- so a re-run of the
+/// enrichment must never clobber a value a human fixed by hand.
+enum ProvenanceEnum {
+  pos
+  heuristic
+  llm
+  manual
 }
 
 /// Admins sign in with email + bcrypt-hashed password.
@@ -94,8 +98,8 @@ model OtpCode {
   attempts   Int       @default(0)
   createdAt  DateTime  @default(now()) @map("created_at")
 
-  userId     String? @map("user_id")
-  user       User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([phone, createdAt])
   @@index([userId])
@@ -103,24 +107,74 @@ model OtpCode {
 }
 
 model Item {
-  id        String       @id @default(uuid())
-  name      String
-  desc      String?
-  cuisine   CuisineEnum
-  course    CourseEnum
-  diet      DietPrefEnum
-  allergens String?
-  protein   ProteinEnum  @default(None)
-  /// 0 (not spicy) to 5 (very spicy)
-  spice     Int          @default(0)
-  /// 0..1 confidence in `spice`. Null means never assessed — distinct from a
-  /// confident 0, which the heuristic classifier could not express.
-  spiceConfidence Float? @map("spice_confidence")
-  tasteTags String[]     @map("taste_tags")
-  serves    Int[]        @default([1])
-  createdAt DateTime     @default(now()) @map("created_at")
-  updatedAt DateTime     @updatedAt @map("updated_at")
+  id   String  @id @default(uuid())
+  name String
+  desc String?
 
+  /// Decimal, never Float: 421.00 must stay 421.00.
+  price    Decimal @db.Decimal(10, 2)
+  currency String  @default("INR") @db.Char(3)
+
+  cuisine CuisineEnum
+  course  CourseEnum
+  diet    DietPrefEnum
+  protein ProteinEnum @default(None)
+
+  /// 0 (not spicy) to 5 (very spicy).
+  spice Int @default(0)
+  /// 0..1 confidence in `spice`. Null means never assessed -- distinct from a
+  /// confident 0, which the heuristic classifier could not express.
+  spiceConfidence Float?         @map("spice_confidence")
+  derivedFrom     ProvenanceEnum @default(heuristic) @map("derived_from")
+  derivedAt       DateTime?      @map("derived_at")
+
+  /// Sensory descriptors, closed vocabulary: smoky, creamy, tangy...
+  tasteTags String[] @map("taste_tags")
+  /// POS merchandising tags, kebab-cased: bestseller, trending, chefs-special...
+  tags      String[]
+  /// Count of the "people like this" tags. Denormalised so it can be an ORDER BY.
+  popularity Int @default(0)
+
+  /// REAL allergens only. Never the POS `allergens` column, which is a
+  /// merchandising string ("Cheesy, Crispy, Snack, Veg") -- presenting that as
+  /// an allergen list is a safety claim nobody verified.
+  allergens         String[] @default([])
+  allergensVerified Boolean  @default(false) @map("allergens_verified")
+
+  /// Two ints, not Int[]: "we're 6, what's shareable" must be a WHERE clause.
+  servesMin Int @default(1) @map("serves_min")
+  servesMax Int @default(1) @map("serves_max")
+
+  isActive    Boolean @default(true) @map("is_active")
+  isAvailable Boolean @default(true) @map("is_available")
+  soldOut     Boolean @default(false) @map("sold_out")
+
+  /// URL or /public path. NEVER a base64 data: URI -- see prisma/seedItems.ts.
+  imageUrl    String? @map("image_url")
+  categoryRef String? @map("category_ref")
+  sortOrder   Int     @default(0) @map("sort_order")
+  source      String  @default("manual")
+  externalRef String? @map("external_ref")
+
+  /// Weighted full-text vector over name (A) and desc (B), maintained by
+  /// Postgres (GENERATED ALWAYS ... STORED, added by hand in the migration).
+  /// Prisma has no tsvector type; `Unsupported` keeps it out of the client and
+  /// out of INSERTs. Tags are not in it -- array_to_string() is only STABLE, so
+  /// Postgres rejects it in a generated column -- they have GIN indexes instead.
+  searchVector Unsupported("tsvector")? @map("search_vector")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([source, externalRef], name: "item_source_ref")
+  @@index([diet, course, spice])
+  @@index([course, cuisine, diet])
+  @@index([price])
+  @@index([popularity(sort: Desc)])
+  @@index([tags], type: Gin)
+  @@index([tasteTags], type: Gin)
+  @@index([searchVector], type: Gin)
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, name: "items_name_trgm_idx")
+  @@index([desc(ops: raw("gin_trgm_ops"))], type: Gin, name: "items_desc_trgm_idx")
   @@map("items")
 }
-

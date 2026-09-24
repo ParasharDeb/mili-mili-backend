@@ -45,46 +45,28 @@ async function call(path: string, body: unknown, timeoutMs: number): Promise<any
   throw new AppError(503, `Mistral request failed: ${lastError}`, "MISTRAL_UNAVAILABLE");
 }
 
-/** Embeds every text in ONE request — the API takes an array. */
-export async function embed(texts: string[]): Promise<number[][]> {
-  if (texts.length === 0) return [];
-
-  const json = await call(
-    "/v1/embeddings",
-    { model: env.MISTRAL_EMBED_MODEL, input: texts },
-    env.RECO_TIMEOUT_MS,
-  );
-
-  const vectors: number[][] = json.data
-    .sort((a: any, b: any) => a.index - b.index)
-    .map((d: any) => d.embedding);
-
-  // A model swap would otherwise surface as an opaque Pinecone 400.
-  for (const v of vectors) {
-    if (v.length !== env.MISTRAL_EMBED_DIM) {
-      throw new AppError(
-        500,
-        `Embedding model '${env.MISTRAL_EMBED_MODEL}' returned ${v.length} dimensions, ` +
-          `but the Pinecone index expects ${env.MISTRAL_EMBED_DIM}.`,
-        "EMBED_DIM_MISMATCH",
-      );
-    }
-  }
-  return vectors;
-}
-
-/** Chat completion constrained to a JSON object. Returns the parsed value. */
-export async function chatJson(messages: ChatMessage[]): Promise<unknown> {
+/**
+ * Chat completion constrained to a JSON object. Returns the parsed value.
+ *
+ * The defaults suit a single request/response turn. `prisma/enrich.ts` catalogues
+ * dishes fifteen at a time and needs both a bigger budget and a longer timeout,
+ * hence the options -- a batch that runs out of tokens comes back as truncated
+ * JSON, which surfaces as MISTRAL_BAD_JSON and costs the whole batch.
+ */
+export async function chatJson(
+  messages: ChatMessage[],
+  opts: { maxTokens?: number; timeoutMs?: number } = {},
+): Promise<unknown> {
   const json = await call(
     "/v1/chat/completions",
     {
       model: env.MISTRAL_CHAT_MODEL,
       messages,
       temperature: 0,
-      max_tokens: 900,
+      max_tokens: opts.maxTokens ?? 900,
       response_format: { type: "json_object" },
     },
-    env.RECO_TIMEOUT_MS,
+    opts.timeoutMs ?? env.RECO_TIMEOUT_MS,
   );
 
   const content = json.choices?.[0]?.message?.content;

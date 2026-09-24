@@ -73,7 +73,7 @@ Phone numbers must be E.164 (`+` country code, 8–15 digits).
 
 `dietPreference` is **required on the first verify** (signup) and ignored afterwards — an
 unrecognised phone without one gets `400 DIET_PREFERENCE_REQUIRED`. Values:
-`Vegeterian`, `Non_vegeterian`, `Eggeterian`, `OnlyFish`, `Jain`.
+`Vegetarian`, `NonVegetarian`, `Eggetarian`, `OnlyFish`, `Jain`.
 
 ### Shared
 
@@ -86,58 +86,22 @@ Send the token as `Authorization: Bearer <token>`.
 
 ## Menu
 
-### Public — what the user app browses
+The menu lives in one table, `items`. The `categories`/`menu_items` pair this
+README used to document was dropped in migration `20260917091044`; the routes
+that went with it no longer exist.
 
-No auth required.
+| Route | Purpose |
+| --- | --- |
+| `GET /api/menu/items` | The menu, grouped by course. Filters: `group`, `course`, `diet`, `q`, `maxPrice`, `partySize`, `tag` |
+| `GET /api/menu/stats` | Composition counts for the staff dashboard |
+| `GET /api/menu/items/:id/pairings` | What goes with this dish, or this drink |
+| `POST /api/menu/chat` | One door for the chat UI -- see below |
+| `POST /api/menu/recommend` | Slot recommendations, for callers that already know |
+| `GET/POST/PATCH/DELETE /api/cart` | The guest's order |
 
-| Method | Path | Notes |
-| --- | --- | --- |
-| `GET` | `/menu/categories` | all active categories, with `itemCount` |
-| `GET` | `/menu/categories/:id` | one category |
-| `GET` | `/menu/items` | `?categoryId=<uuid>` to filter |
-| `GET` | `/menu/items/:id` | one item |
-
-```bash
-curl localhost:3000/api/menu/categories
-# { "categories": [ { "id", "name", "slug", "description",
-#                     "imageUrl", "sortOrder", "isActive", "itemCount" } ] }
-```
-
-Inactive categories and unavailable items are hidden. An admin can pass
-`?includeInactive=true` / `?includeUnavailable=true` **with an admin token** on these same
-routes to see everything; the flags are ignored for anyone else.
-
-### Admin — dashboard writes
-
-Every route below requires `Authorization: Bearer <admin JWT>`. A user token gets `403`.
-
-| Method | Path | Body |
-| --- | --- | --- |
-| `POST` | `/admin/menu/categories` | `{ name, description?, imageUrl?, sortOrder?, isActive? }` |
-| `PATCH` | `/admin/menu/categories/:id` | any subset of the above |
-| `DELETE` | `/admin/menu/categories/:id` | — |
-| `POST` | `/admin/menu/items` | `{ name, price, categoryId, description?, imageUrl?, isAvailable? }` |
-| `PATCH` | `/admin/menu/items/:id` | any subset |
-| `DELETE` | `/admin/menu/items/:id` | — |
-
-The edit you asked for — name, price, image, description:
-
-```bash
-curl -X PATCH localhost:3000/api/admin/menu/items/$ID   -H "authorization: Bearer $ADMIN_TOKEN"   -H 'content-type: application/json'   -d '{"name":"Paneer Tikka","price":"349.00",
-       "imageUrl":"https://cdn.example.com/paneer.jpg",
-       "description":"Char-grilled, 6 pieces"}'
-```
-
-`PATCH` is a true partial update: omit a field and it is untouched; send `null` for
-`description` or `imageUrl` to clear it.
-
-### Prices
-
-Stored as `Decimal(10, 2)` and returned as a **2-decimal string** (`"349.00"`), not a number —
-floats can't hold money exactly. On input both `349` and `"349.00"` are accepted; anything with
-more than 2 decimals, negative, or in scientific notation is rejected.
-
-Deleting a category that still has items returns `409 CATEGORY_NOT_EMPTY` rather than cascading.
+Every guest-facing query is filtered to `is_active AND is_available AND NOT
+sold_out`. Prices are `Decimal(10,2)` and are converted with `.toNumber()` in
+`toPublicItem` -- a Prisma `Decimal` does not `JSON.stringify` into a number.
 
 ## OTP behaviour
 
@@ -159,16 +123,29 @@ throws in production — wire up Twilio/MSG91 there before deploying.
 ```
 index.ts                     server entry (listen + graceful shutdown)
 db/index.ts                  PrismaClient singleton (pg driver adapter)
-prisma/schema.prisma         Admin, User, OtpCode
+prisma/schema.prisma         Admin, User, OtpCode, Item
 prisma/seed.ts               creates the first admin
+prisma/seedItems.ts          POS export -> Postgres (the only normalisation point)
+prisma/classifyItem.ts       regex classifier for what the POS never captured
+prisma/enrich.ts             Mistral re-derives spice, taste, cuisine, diet
 src/
   app.ts                     express app factory
-  routes/                    index -> auth (admin/user) + menu (public/admin)
+  domain/                    menu.constants, diet.hardrules (name beats model)
+  routes/                    index -> auth + menu + cart
   controllers/               thin: parse result -> status + json
-  services/                  business logic + all DB access
-  middleware/                validate (zod), auth (JWT), error
-  schemas/auth.schema.ts     zod request schemas
-  lib/                       env, errors, jwt, password
+  services/
+    menu.route.service.ts    Jev classifies the turn
+    menu.slots.service.ts    splits a request, resolves each part
+    menu.sql.service.ts      all retrieval (replaces the vector index)
+    menu.rank.ts             pure scoring, no I/O
+    menu.filter.ts           slot -> Prisma where; the diet semantics live here
+    menu.chat.service.ts     the dispatcher
+    menu.advise.service.ts   whole menu -> LLM, for judgement calls
+    menu.reference.ts        "yes, the first one" -> a dish
+    menu.cart.service.ts     the order
+  middleware/                validate (zod), auth (JWT), session, error
+  lib/                       env, errors, jwt, password, mistral, jev, session
+tests/                       bun test -- the pure modules
 ```
 
 Routers mount in `src/routes/index.ts`; controllers never touch Prisma directly.
@@ -182,6 +159,10 @@ Routers mount in `src/routes/index.ts`; controllers never touch Prisma directly.
 | `bun run db:migrate` | create & apply a migration (dev) |
 | `bun run db:deploy` | apply migrations (prod/CI) |
 | `bun run db:seed` | create the first admin |
+| `bun run db:seed:items` | POS export -> Postgres. Pass `--skip-images` to go fast |
+| `bun run db:enrich` | Mistral fills spice/taste/cuisine. Run AFTER seeding |
+| `bun run db:rules` | Re-apply the deterministic guards, no model calls |
+| `bun test` | the pure modules: diet mapping, slots, referents, ranking |
 | `bun run db:studio` | Prisma Studio |
 | `bun run db:generate` | regenerate the client after schema edits |
 
@@ -200,9 +181,10 @@ curl -X POST http://localhost:3000/api/menu/recommend   -H "Content-Type: applic
 | `perSlot` | 3 | Ranked options returned per constraint |
 | `includeDrinks` | false | Let every slot consider alcohol/shisha too |
 
-A single embedding cannot express "2 veg AND 1 spicy non-veg", so the request is
-split into **slots**, one per stated constraint. Each slot is embedded and queried
-against Pinecone with its own metadata filter, then slots are filled
+One query cannot express "2 veg AND 1 spicy non-veg", so the request is split
+into **slots**, one per stated constraint. Splitting and counting are regex --
+exact, and a classifier's weakest axis. Each slot becomes its own SQL query
+(`menu.filter.ts` -> `menu.sql.service.ts`), and slots are then filled
 scarcity-first so a thin constraint is not starved by a greedier one.
 
 `count` (guests covered) and `recommendations.length` (options offered) are
@@ -214,13 +196,18 @@ Notes worth knowing:
   carries `SLOT_NO_MATCHES` and an empty list rather than substituting something
   off-constraint. Everything else (spice band, then cuisine, then course) is
   relaxed one rung at a time and reported in `relaxations`.
-- Results are re-verified against Postgres after retrieval. Pinecone metadata is
-  only a snapshot that refreshes when someone re-runs `python ingest.py`, so an
-  item edited in the database would otherwise keep matching its old filter.
-- The keys are optional. Without `MISTRAL_API_KEY` / `PINECONE_API_KEY` the server
-  still boots and only this route returns 503 `RECO_UNCONFIGURED`.
-- If Mistral is unreachable the query falls back to a regex parser; the response
-  reports which was used in `meta.parseMode`.
+- Results are re-verified against Postgres after retrieval with `dietAllows`.
+  That check is now tautological -- the query built the set -- and it stays
+  anyway: it is the last line of defence against a bug in the filter, and it is
+  what makes a classifier that falls back to `diet: "any"` safe.
+- **Recommendations need no API key.** They are SQL. Only the two prose paths
+  (the grounded answer and the advisory combo) need `MISTRAL_API_KEY`.
+- Ranking is deterministic and explainable (`menu.rank.ts`): trigram and
+  full-text similarity from Postgres, combined in TypeScript with tag overlap,
+  spice proximity, cuisine and popularity. The same question ranks the same way
+  twice, which the vector path never did.
+- If Jev is unreachable or unconfigured, routing and slotting fall back to
+  regex. The response reports which ran in `meta.routeMode` / `meta.slotMode`.
 
 ### Pairings — "what goes with this?"
 
@@ -235,13 +222,16 @@ curl "http://localhost:3000/api/menu/items/$ITEM_ID/pairings?limit=3"
 #   "pairings": [ { "rank", "score", "why", "item" } ], "meta" }
 ```
 
-Ranking blends two signals: Pinecone semantic similarity (embeds the item's own
-name/desc/tags, same embedding space `python ingest.py` writes) and a small
-deterministic flavour-affinity table over `spice` / `tasteTags` / `protein` —
-spicy wants something cooling, rich/creamy wants something to cut it, smoky
-echoes smoky, dessert wants sweet. `why` is generated from that table, not an
-LLM call, for the same hallucination-risk reason as `recommend`'s `explain()`.
+Ranking is a deterministic flavour-affinity table over `spice` / `tasteTags` /
+`protein` — spicy wants something cooling, rich/creamy wants something to cut it,
+smoky echoes smoky, dessert wants sweet. `why` is generated from that table, not
+an LLM call, for the same hallucination-risk reason as `recommend`'s `explain()`.
+
+This used to blend the affinity table with an embedding, weighted 0.45/0.55. The
+embedding did real work here -- it carried world knowledge a tag table cannot,
+reading "Laphroaig" as smoky from a bare product name -- so removing it is a
+genuine regression for plain spirits, which the enrichment leaves nearly
+tag-less. Known and accepted, not overlooked.
 
 `Shisha` items return `422 PAIRING_NOT_SUPPORTED` — hookah pairing isn't
-modelled. An unknown id is `404 ITEM_NOT_FOUND`; an unconfigured Mistral/Pinecone
-is `503 RECO_UNCONFIGURED`, same as `/recommend`.
+modelled. An unknown id is `404 ITEM_NOT_FOUND`. No API key is required.
