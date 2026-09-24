@@ -1,0 +1,13 @@
+node_modules
+generated
+.git
+.env
+.env.*
+!.env.example
+.agents
+coverage
+logs
+*.log
+dist
+out
+package-lock.json
