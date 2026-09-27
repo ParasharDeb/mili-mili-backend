@@ -15,6 +15,23 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
   next();
 }
 
+/**
+ * Like `requireAuth`, but a missing or bad token is simply no identity. For guest
+ * routes where signing in adds a name and history but is never required.
+ */
+export async function optionalAuth(req: Request, _res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  if (header?.startsWith("Bearer ")) {
+    try {
+      const payload = await verifyToken(header.slice("Bearer ".length).trim());
+      req.auth = { id: payload.sub, role: payload.role };
+    } catch {
+      // An expired token must not stop a guest from asking for the manager.
+    }
+  }
+  next();
+}
+
 /** Must run after `requireAuth`. */
 export function requireRole(...roles: Role[]) {
   return (req: Request, _res: Response, next: NextFunction) => {

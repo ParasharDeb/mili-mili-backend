@@ -1,6 +1,9 @@
 import type { Request, Response } from "express";
+import { prisma } from "../../db/index.ts";
 import * as service from "../services/menu.cart.service.ts";
-import type { AddManyToCartInput, AddToCartInput, SetQuantityInput } from "../schemas/cart.schema.ts";
+import { followUpFor } from "../services/menu.followup.service.ts";
+import { toPublicItem } from "../services/menu.items.service.ts";
+import type { AddManyToCartInput, AddToCartInput, FollowUpInput, SetQuantityInput } from "../schemas/cart.schema.ts";
 
 export async function view(req: Request, res: Response) {
   res.json(await service.view(req.session));
@@ -34,4 +37,11 @@ export async function remove(req: Request, res: Response) {
 export async function clear(req: Request, res: Response) {
   service.clear(req.session);
   res.json(await service.view(req.session));
+}
+
+/** The chat's single "bread or rice with that?", or null once it has been asked. */
+export async function followUp(req: Request, res: Response) {
+  const { itemIds } = req.body as FollowUpInput;
+  const rows = await prisma.item.findMany({ where: { id: { in: itemIds } } });
+  res.json({ followUp: await followUpFor(req.session, rows.map(toPublicItem)) });
 }

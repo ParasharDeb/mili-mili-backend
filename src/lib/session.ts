@@ -56,6 +56,35 @@ export type Session = {
    * resolves against -- a chat message cannot carry the UI's stepper state.
    */
   lastCombos?: { title: string; lines: { itemId: string; qty: number }[] }[] | null;
+
+  /* ---- concierge state; see services/concierge.service.ts ---- */
+
+  /** Set on a hard stop. From here a human has the table and the assistant says nothing. */
+  mutedAt?: number | null;
+  /** Set once the assistant has apologised. Anger after this is a hard stop. */
+  apologisedAt?: number | null;
+  /** The guest's name is said once per visit, not every message. */
+  nameUsed?: boolean;
+  /** Each small delight fires at most once per visit. */
+  delights?: { occasion?: boolean; waiting?: boolean; longGap?: boolean; farewell?: boolean };
+  feedbackDeclined?: boolean;
+  feedbackSubmitted?: boolean;
+  /** A reservation being collected one question at a time. */
+  pendingReservation?: PendingReservation | null;
+  /** "Would you like our manager to come to your table?" is awaiting a yes or no. */
+  pendingManagerOffer?: boolean;
+  /**
+   * The one "bread or rice with that?" of the visit. Present once asked, and it
+   * is never asked again; `pending` only while the guest has not yet replied.
+   */
+  followUp?: { askedAt: number; pending: boolean } | null;
+};
+
+export type PendingReservation = {
+  message: string;
+  dateText: string | null;
+  timeText: string | null;
+  partySize: number | null;
 };
 
 const MAX_TURNS = 6;

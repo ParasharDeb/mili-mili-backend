@@ -1,4 +1,11 @@
 import { env } from "../lib/env.ts";
+import {
+  detectAnger,
+  detectHardStop,
+  detectTopic,
+  type ConciergeTopic,
+  type HardStopCategory,
+} from "../domain/concierge.detect.ts";
 import { askJev, choice, decided, isTrue, noul, score } from "../lib/jev.ts";
 import type { Session } from "../lib/session.ts";
 import { CHUNK_QUESTIONS, heuristicPlan } from "./menu.slots.service.ts";
@@ -36,6 +43,11 @@ export type Route = {
   mode: "jev" | "heuristic";
   /** The slot answers from this same call, reusable when there is one chunk. */
   slotAnswers: Record<string, unknown> | null;
+  /** Something for the floor rather than the menu. See concierge.service.ts. */
+  conciergeTopic: ConciergeTopic;
+  /** Non-null means a human takes the table now. */
+  hardStop: HardStopCategory | null;
+  angry: boolean;
 };
 
 const ROUTE_QUESTIONS = {
@@ -89,6 +101,33 @@ const ROUTE_QUESTIONS = {
       bare_yes: "A bare acceptance with no pointer at all -- 'yes', 'ok', 'sure', 'go ahead', 'done'.",
       unclear: "The message does not identify a dish clearly enough to act on.",
     },
+  ),
+
+  // The concierge questions sit beside the five-way intent rather than inside
+  // it, so adding them cannot move the accuracy of the menu routing.
+  concierge_topic: choice(
+    "A guest at a restaurant is messaging its concierge. Is the guest's LATEST message asking the floor for something other than food suggestions or their order?",
+    {
+      none: "No -- it is about the menu, dishes, drinks, their order, a greeting, or anything else not listed here.",
+      issue:
+        "Something at the table or in the restaurant is not right and they want it fixed: the table, the temperature, the noise, the music being too loud, the washroom, cutlery, a slow or cold or wrong dish, being ignored.",
+      call_manager: "They want the manager to come over or to speak with the manager.",
+      call_captain: "They want their captain, a waiter or a member of staff to come to the table.",
+      reservation: "They want to book or reserve a table for a future date or time.",
+      music_request: "They are asking for a song, artist or kind of music to be played.",
+      feedback: "They want to give feedback, a review or a rating about their evening.",
+      occasion: "They mention that they are celebrating an occasion tonight -- a birthday, an anniversary, a promotion.",
+      waiting_for_friends: "They are waiting for the rest of their party to arrive.",
+      farewell: "They are saying goodbye, leaving, or thanking the restaurant for the evening.",
+    },
+  ),
+
+  hard_stop: noul(
+    "The guest's latest message reports something a human manager must handle personally, at once: feeling ill or food poisoning, an allergic reaction, something foreign in the food (hair, glass, an insect), an injury, an allegation about a staff member's conduct, a dispute about the bill or a charge, or a mention of police, lawyers, the media, or posting about this publicly. Asking whether a dish contains an allergen is NOT this.",
+  ),
+
+  angry: noul(
+    "The guest's latest message is angry, hostile or clearly upset with the restaurant -- not merely disappointed about a small thing.",
   ),
 
   // The per-chunk slot questions ride along, so a single-constraint request is
@@ -168,6 +207,9 @@ export function routeHeuristic(message: string, session: Session): Route {
     referentKind: AFFIRM_RE.test(message) ? "bare_yes" : "by_name",
     mode: "heuristic",
     slotAnswers: null,
+    conciergeTopic: detectTopic(message),
+    hardStop: detectHardStop(message),
+    angry: detectAnger(message),
   };
 }
 
@@ -195,12 +237,30 @@ export async function classify(message: string, session: Session): Promise<Route
   const answers = await askJev(buildState(message, session), ROUTE_QUESTIONS);
   if (!answers) return routeHeuristic(message, session);
 
+  const hardStop = isTrue(answers.hard_stop)
+    ? detectHardStop(message) ?? "unspecified"
+    // The regex runs even when Jev says no. Missing a hard stop is the expensive
+    // mistake; see concierge.detect.ts.
+    : detectHardStop(message);
+  const topicAnswer = answers.concierge_topic;
+  const conciergeTopic: ConciergeTopic =
+    topicAnswer && topicAnswer.confidence >= env.JEV_MIN_CONFIDENCE
+      ? (topicAnswer.choice as ConciergeTopic)
+      : detectTopic(message);
+  const angry = isTrue(answers.angry) || detectAnger(message);
+
   const intentAnswer = answers.intent;
   // An unconfident five-way partition is worse than the regex, which at least
   // fails in ways we have seen before.
   if (!intentAnswer || intentAnswer.confidence < env.JEV_MIN_CONFIDENCE) {
     const fallback = routeHeuristic(message, session);
-    return { ...fallback, confidence: intentAnswer?.confidence ?? 0 };
+    return {
+      ...fallback,
+      confidence: intentAnswer?.confidence ?? 0,
+      conciergeTopic,
+      hardStop,
+      angry,
+    };
   }
 
   const slotAnswers = {
@@ -223,6 +283,9 @@ export async function classify(message: string, session: Session): Promise<Route
     referentKind: decided<ReferentKind>(answers.referent_kind, "unclear"),
     mode: "jev",
     slotAnswers,
+    conciergeTopic,
+    hardStop,
+    angry,
   };
 }
 

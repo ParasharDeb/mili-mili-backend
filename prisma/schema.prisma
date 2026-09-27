@@ -76,14 +76,21 @@ model Admin {
 
 /// End users sign up / sign in with a phone number + OTP. They have no password.
 model User {
-  id              String       @id @default(uuid())
-  phone           String       @unique
-  name            String?
-  phoneVerifiedAt DateTime?    @map("phone_verified_at")
-  createdAt       DateTime     @default(now()) @map("created_at")
-  updatedAt       DateTime     @updatedAt @map("updated_at")
-  diet_preference DietPrefEnum
-  otpCodes        OtpCode[]
+  id               String       @id @default(uuid())
+  phone            String       @unique
+  name             String?
+  phoneVerifiedAt  DateTime?    @map("phone_verified_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  diet_preference  DietPrefEnum
+  /// Start of the guest's previous chat session. Drives "it's been a while".
+  lastVisitAt      DateTime?    @map("last_visit_at")
+  /// The Google review link is offered at most once per 30 days.
+  lastReviewAskAt  DateTime?    @map("last_review_ask_at")
+  /// Off unless the guest opts in separately. The chat never markets otherwise.
+  marketingOptIn   Boolean      @default(false) @map("marketing_opt_in")
+  marketingOptInAt DateTime?    @map("marketing_opt_in_at")
+  otpCodes         OtpCode[]
 
   @@map("users")
 }
@@ -118,10 +125,10 @@ model Item {
   cuisine CuisineEnum
   course  CourseEnum
   diet    DietPrefEnum
-  protein ProteinEnum @default(None)
+  protein ProteinEnum  @default(None)
 
   /// 0 (not spicy) to 5 (very spicy).
-  spice Int @default(0)
+  spice           Int            @default(0)
   /// 0..1 confidence in `spice`. Null means never assessed -- distinct from a
   /// confident 0, which the heuristic classifier could not express.
   spiceConfidence Float?         @map("spice_confidence")
@@ -129,11 +136,11 @@ model Item {
   derivedAt       DateTime?      @map("derived_at")
 
   /// Sensory descriptors, closed vocabulary: smoky, creamy, tangy...
-  tasteTags String[] @map("taste_tags")
+  tasteTags  String[] @map("taste_tags")
   /// POS merchandising tags, kebab-cased: bestseller, trending, chefs-special...
-  tags      String[]
+  tags       String[]
   /// Count of the "people like this" tags. Denormalised so it can be an ORDER BY.
-  popularity Int @default(0)
+  popularity Int      @default(0)
 
   /// REAL allergens only. Never the POS `allergens` column, which is a
   /// merchandising string ("Cheesy, Crispy, Snack, Veg") -- presenting that as
@@ -177,4 +184,53 @@ model Item {
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, name: "items_name_trgm_idx")
   @@index([desc(ops: raw("gin_trgm_ops"))], type: Gin, name: "items_desc_trgm_idx")
   @@map("items")
+}
+
+/// Everything a guest asks of the floor rather than of the menu. Written now so
+/// a notifier can be added later -- until then nobody is paged by these rows.
+enum GuestRequestTypeEnum {
+  hard_stop
+  issue
+  call_manager
+  call_captain
+  reservation
+  music
+}
+
+model GuestRequest {
+  id        String               @id @default(uuid())
+  type      GuestRequestTypeEnum
+  sessionId String               @map("session_id")
+  userId    String?              @map("user_id")
+  /// The guest's exact words. Whoever acts on this must not make them repeat it.
+  message   String
+  /// Hard-stop category, or the reservation's dateText / timeText / partySize.
+  details   Json?
+  status    String               @default("open")
+  createdAt DateTime             @default(now()) @map("created_at")
+
+  @@index([type, createdAt])
+  @@index([sessionId])
+  @@map("guest_requests")
+}
+
+model Feedback {
+  id          String   @id @default(uuid())
+  sessionId   String   @map("session_id")
+  userId      String?  @map("user_id")
+  overall     Int
+  food        Int
+  service     Int
+  ambience    Int
+  cleanliness Int
+  comment     String?
+  /// "Everything was lovely" -- a one-tap 5, not a filled-in form.
+  quick       Boolean  @default(false)
+  /// Overall or any category at 2 or below.
+  escalate    Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([sessionId])
+  @@index([escalate, createdAt])
+  @@map("feedback")
 }

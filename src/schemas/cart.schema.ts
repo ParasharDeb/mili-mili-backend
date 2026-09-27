@@ -25,6 +25,12 @@ export const cartItemParamSchema = z.object({
   itemId: z.string().uuid("Invalid item id"),
 });
 
+/** What was just added from a button, so the chat can ask its one follow-up. */
+export const followUpSchema = z.object({
+  itemIds: z.array(z.string().uuid("Invalid item id")).min(1).max(10),
+});
+
 export type AddToCartInput = z.infer<typeof addToCartSchema>;
 export type AddManyToCartInput = z.infer<typeof addManyToCartSchema>;
 export type SetQuantityInput = z.infer<typeof setQuantitySchema>;
+export type FollowUpInput = z.infer<typeof followUpSchema>;

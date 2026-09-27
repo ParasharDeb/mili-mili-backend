@@ -8,8 +8,11 @@ import {
 import type { ChatInput } from "../schemas/menu.schema.ts";
 import { ask } from "./menu.ask.service.ts";
 import { advise } from "./menu.advise.service.ts";
+import { handleConcierge } from "./concierge.service.ts";
+import type { Guest } from "./feedback.service.ts";
 import { composeCombos, type Combo } from "./menu.combo.service.ts";
 import * as cart from "./menu.cart.service.ts";
+import { followUpFor, settleFollowUp, type FollowUp } from "./menu.followup.service.ts";
 import type { PublicItem } from "./menu.items.service.ts";
 import { nameKey, quantityIn, resolve } from "./menu.reference.ts";
 import { recommend } from "./menu.recommend.service.ts";
@@ -32,8 +35,30 @@ export type ChatResult =
   | Awaited<ReturnType<typeof recommend>> & { kind: "recommendations" }
   | { kind: "advice"; query: string; answer: string; groups: unknown[]; warnings: unknown[]; chips: string[]; meta: Meta }
   | { kind: "combos"; query: string; answer: string; combos: Combo[]; warnings: unknown[]; chips: string[]; meta: Meta }
-  | { kind: "answer"; query: string; answer: string; dishes: PublicItem[]; chips: string[]; meta: Meta }
-  | { kind: "cart"; query: string; action: string; answer: string; changed: PublicItem[]; cart: cart.CartView; chips: string[]; meta: Meta }
+  | {
+      kind: "answer";
+      query: string;
+      answer: string;
+      dishes: PublicItem[];
+      chips: string[];
+      meta: Meta;
+      /** Set by the concierge paths: "handoff", "open_feedback_form", "reservation_requested"... */
+      action?: string;
+      /** A human has the table. The assistant sends nothing further this visit. */
+      muted?: boolean;
+    }
+  | {
+      kind: "cart";
+      query: string;
+      action: string;
+      answer: string;
+      changed: PublicItem[];
+      cart: cart.CartView;
+      chips: string[];
+      meta: Meta;
+      /** A single "bread or rice with that?", sent at most once a visit. */
+      followUp?: FollowUp;
+    }
   | { kind: "clarify"; query: string; answer: string; options: { label: string; message: string; item: PublicItem }[]; chips: string[]; meta: Meta };
 
 type Meta = {
@@ -59,8 +84,34 @@ function toOffered(item: PublicItem): Omit<OfferedDish, "ordinal"> {
   };
 }
 
-export async function chat(input: ChatInput, session: Session): Promise<ChatResult> {
+export async function chat(
+  input: ChatInput,
+  session: Session,
+  guest: Guest = null,
+): Promise<ChatResult> {
   const started = Date.now();
+
+  // After a hard stop the assistant is silent: a manager has the table, and a
+  // menu bot chiming in underneath them is the worst thing it could do.
+  if (session.mutedAt) {
+    return {
+      kind: "answer",
+      query: input.message,
+      answer: "",
+      dishes: [],
+      chips: [],
+      muted: true,
+      meta: {
+        route: "muted",
+        routeMode: "heuristic",
+        intentConfidence: 1,
+        chatModel: env.MISTRAL_CHAT_MODEL,
+        tookMs: Date.now() - started,
+        sessionId: session.id,
+      },
+    };
+  }
+
   const route = await classify(input.message, session);
 
   recordTurn(session, "guest", input.message);
@@ -79,6 +130,41 @@ export async function chat(input: ChatInput, session: Session): Promise<ChatResu
   // two" often scores as a structured query on the five-way partition while the
   // yes/no question is unambiguous -- a single proposition is the more reliable
   // signal for this one case.
+  // The floor before the menu: a hard stop, a complaint or a booking must never
+  // be answered with dishes.
+  const concierge = await handleConcierge(input.message, session, route, guest);
+  if (concierge && "reply" in concierge) {
+    const { answer, chips, action, muted } = concierge.reply;
+    const result: ChatResult = {
+      kind: "answer",
+      query: input.message,
+      answer,
+      dishes: [],
+      chips,
+      action,
+      muted,
+      meta: meta({ route: `concierge:${action ?? route.conciergeTopic}` }),
+    };
+    if (answer) recordTurn(session, "bot", answer.slice(0, 160));
+    return result;
+  }
+  const preface = concierge?.preface;
+
+  // "Bread with that?" -- "No thanks." That is the end of it: an acknowledgement,
+  // no second suggestion and no reason to reconsider.
+  if (settleFollowUp(session, input.message)) {
+    const answer = "No problem.";
+    recordTurn(session, "bot", answer);
+    return {
+      kind: "answer",
+      query: input.message,
+      answer,
+      dishes: [],
+      chips: ["Show my order", "Something to drink", "What else do you have?"],
+      meta: meta({ route: "follow_up:declined" }),
+    };
+  }
+
   const isCart =
     route.intent === "cart_action" ||
     (route.confirmingOffer && (session.lastOffer?.dishes.length ?? 0) > 0);
@@ -103,8 +189,22 @@ export async function chat(input: ChatInput, session: Session): Promise<ChatResu
           ? handleSmalltalk(input, meta)
           : await handleStructured(input, session, route, meta);
 
+  if (preface) withPreface(result, preface);
+
   recordTurn(session, "bot", summarise(result));
   return result;
+}
+
+/**
+ * Puts a warm line ("Happy birthday") ahead of the menu answer. Recommendations
+ * carry no prose of their own, so there it rides as a separate field.
+ */
+function withPreface(result: ChatResult, preface: string): void {
+  if ("answer" in result && typeof result.answer === "string") {
+    result.answer = `${preface}\n\n${result.answer}`;
+  } else {
+    (result as { preface?: string }).preface = preface;
+  }
 }
 
 /* ------------------------------------------------------------ structured -- */
@@ -301,16 +401,20 @@ async function handleCart(
   route: Route,
   meta: (e?: Partial<Meta>) => Meta,
 ): Promise<ChatResult> {
-  const done = async (action: string, answer: string, changed: PublicItem[] = []) => ({
-    kind: "cart" as const,
-    query: input.message,
-    action,
-    answer,
-    changed,
-    cart: await cart.view(session),
-    chips: ["What else do you have?", "Show my order", "Something to drink"],
-    meta: meta(),
-  });
+  const done = async (action: string, answer: string, changed: PublicItem[] = []) => {
+    const followUp = action === "added" ? await followUpFor(session, changed) : null;
+    return {
+      kind: "cart" as const,
+      query: input.message,
+      action,
+      answer,
+      changed,
+      cart: await cart.view(session),
+      chips: followUp?.chips ?? ["What else do you have?", "Show my order", "Something to drink"],
+      meta: meta(),
+      ...(followUp ? { followUp } : {}),
+    };
+  };
 
   // "Add combo 2" -- at the quantities suggested, since a chat message cannot
   // carry the stepper state the UI button sends.
@@ -499,7 +603,10 @@ function summarise(result: ChatResult): string {
         .map((c, i) => `${i + 1}. ${c.title} (${c.items.map((x) => x.item.name).join(", ")})`)
         .join("; ")}`.slice(0, 380);
     case "cart":
-      return `${result.action}: ${result.answer.slice(0, 120)}`;
+      return (
+        `${result.action}: ${result.answer.slice(0, 120)}` +
+        (result.followUp ? ` | asked: ${result.followUp.question.slice(0, 160)}` : "")
+      );
     case "clarify":
       return `asked which dish: ${result.options.map((o) => o.label).join(", ")}`;
     default:

@@ -56,6 +56,11 @@ const envSchema = z.object({
   SESSION_MAX: z.coerce.number().int().positive().default(5000),
   CART_MAX_LINES: z.coerce.number().int().positive().default(40),
 
+  /** Offered after a 5-star rating. Empty means the link is simply left out. */
+  GOOGLE_REVIEW_URL: z.string().default(""),
+  /** A logged-in guest away longer than this gets "it's been a while". */
+  LONG_GAP_DAYS: z.coerce.number().int().positive().default(60),
+
   OTP_TTL_MINUTES: z.coerce.number().int().positive().default(5),
   OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   /** Min seconds between two OTP requests for the same phone number. */

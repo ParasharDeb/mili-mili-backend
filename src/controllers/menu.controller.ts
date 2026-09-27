@@ -11,6 +11,7 @@ import * as pairingService from "../services/menu.pairing.service.ts";
 import * as reco from "../services/menu.recommend.service.ts";
 import { heuristicPlan, planSlots } from "../services/menu.slots.service.ts";
 import { isJevAvailable } from "../lib/jev.ts";
+import { loadGuest } from "../services/concierge.service.ts";
 
 export async function recommend(req: Request, res: Response) {
   const input = req.body as RecommendInput;
@@ -23,7 +24,8 @@ export async function recommend(req: Request, res: Response) {
 }
 
 export async function chat(req: Request, res: Response) {
-  const result = await chatService.chat(req.body as ChatInput, req.session);
+  const guest = await loadGuest(req.auth);
+  const result = await chatService.chat(req.body as ChatInput, req.session, guest);
   res.json(result);
 }
 
