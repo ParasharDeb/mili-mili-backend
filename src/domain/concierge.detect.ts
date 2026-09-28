@@ -27,6 +27,7 @@ export type ConciergeTopic =
   | "reservation"
   | "music_request"
   | "feedback"
+  | "review"
   | "occasion"
   | "waiting_for_friends"
   | "farewell";
@@ -105,6 +106,94 @@ const MUSIC_RE =
   /\b(can you|could you|would you|please|pls|plz|ask (them|the dj) to)?\s*(play|put on)\b.{0,40}\b(song|track|music|by|some|something)\b|\b(song|track) request\b|\brequest (a )?(song|track)\b|\bdj\b.{0,25}\bplay\b/i;
 const FEEDBACK_RE =
   /\b(feedback|give (you )?(a |some )?(review|rating)|rate (you|the|this|us|my)|leave (a )?review|want to review)\b/i;
+const PRAISE =
+  "amazing|delicious|excellent|great|lovely|fantastic|superb|perfect|tasty|yummy|good|nice|brilliant|outstanding|incredible|awesome|wonderful|divine|flavou?rful|fresh|spot on|the best|to die for|fab|fabulous";
+const FAULT =
+  "bland|tasteless|flavou?rless|salty|oily|greasy|soggy|dry|chewy|rubbery|overcooked|undercooked|burnt|stale|cold|lukewarm|sour|bitter|watery|mushy|tough|raw|bad|average|mediocre|meh|disappointing|underwhelming|off|slow|too (sweet|spicy|hot|salty|sour|oily|rich|heavy|much)";
+const HEDGE = "(?:a bit |that |a little |a tad |bit |really |very |so |quite |too |way too |pretty |kind of |kinda |super |absolutely |just |not |n't |honestly |genuinely )*";
+
+/**
+ * An opinion about something they have had: "the pasta was too bland", "loved
+ * the biryani". A verdict, not a question and not a request -- "something not
+ * too spicy" wants a dish, and "is the pasta bland?" wants an answer.
+ */
+const REVIEW_RE = new RegExp(
+  `\\b(was|were|is|wasn'?t|weren'?t|isn'?t|tasted|tastes|felt|looked|seemed)\\s+${HEDGE}(${PRAISE}|${FAULT})\\b` +
+    `|\\b(loved|enjoyed|liked|hated|disliked|(?:do|did|does)(?: ?n'?t| not)(?: really)? (like|enjoy|love)|not a fan of)\\s+(the|that|those|this|your|our|my|it)\\b`,
+  "i",
+);
+const NOT_A_REVIEW_RE =
+  /\?\s*$|^\s*(is|are|was|were|does|do|did|can|could|would|will|how|what|which|why)\b|\b(suggest|recommend|want|would like|looking for|give me|show me|something|anything|any dish|(that|which) is)\b/i;
+
+const PRAISE_RE = new RegExp(`\\b(${PRAISE}|loved|enjoyed|liked)\\b`, "gi");
+const FAULT_RE = new RegExp(`\\b(${FAULT}|hated|disliked)\\b`, "gi");
+const NEGATED_PRAISE_RE = new RegExp(
+  `\\b(not|n't|never|wasn'?t|weren'?t|isn'?t|(?:do|did|does)(?: ?n'?t| not)(?: really)?|nothing)\\s+(that |very |really |so |too |particularly |exactly )?(${PRAISE}|like|enjoy|love)\\w*\\b|not a fan`,
+  "gi",
+);
+
+/** Which way a review leans. Both at once -- "great naan but the dal was salty" -- is mixed. */
+export function reviewSentiment(message: string): "positive" | "negative" | "mixed" {
+  const negated = message.match(NEGATED_PRAISE_RE)?.length ?? 0;
+  const rest = message.replace(NEGATED_PRAISE_RE, " ");
+  const praise = rest.match(PRAISE_RE)?.length ?? 0;
+  const fault = (rest.match(FAULT_RE)?.length ?? 0) + negated;
+  if (praise && fault) return "mixed";
+  return fault ? "negative" : "positive";
+}
+
+/**
+ * The review also asks for food: "the pasta was bland -- something spicier?".
+ * Read from the words, not the intent: the regex router files a bare "the pasta
+ * was too bland" as a structured query, because "bland" reads as a spice filter.
+ */
+export function reviewAsksForDishes(message: string): boolean {
+  return /\b(suggest|recommend|something|anything|another|instead|else|different|try next|what (should|can|do)|get us|bring us|give me|show me)\b|\?/i.test(message);
+}
+
+export function isReview(message: string): boolean {
+  return REVIEW_RE.test(message) && !NOT_A_REVIEW_RE.test(message);
+}
+
+const LEAD_IN = /^(\W*(honestly|and|but|so|oh|wow|well|the|your|that|this|those|our|my|i think|tbh)\b)+/i;
+const SUBJECT_RE =
+  /^\s*(.{2,40}?)\s+(was|were|is|wasn'?t|weren'?t|isn'?t|tasted|tastes|felt|looked|seemed)\b/i;
+const OBJECT_RE =
+  /\b(loved|enjoyed|liked|hated|disliked|(?:do|did|does)(?: ?n'?t| not)(?: really)? (like|enjoy|love)|not a fan of)\s+(the|that|those|this|your|our|my)?\s*(.{2,40}?)\s*([.,!;]|\s(but|and|so|it|was|were|tonight|today)\b|$)/i;
+/** Words that name the evening, not a dish. A review of these has no dish to link. */
+const NOT_A_DISH = /^(it|food|the food|everything|all|service|the service|meal|dinner|lunch|evening|night|place|ambience|vibe|music|staff|waiter|captain|you|that|this)$/i;
+
+/**
+ * The words a review uses for its dish, as the guest said them: "the pasta was
+ * too bland" -> "pasta". Null when it is about the evening rather than a dish.
+ * Matching these words to a menu row is the caller's job.
+ */
+export function reviewedDish(message: string): string | null {
+  const subject = SUBJECT_RE.exec(message.replace(LEAD_IN, " "))?.[1];
+  const phrase = (subject ?? OBJECT_RE.exec(message)?.[4])?.replace(LEAD_IN, "").trim();
+  if (!phrase || NOT_A_DISH.test(phrase)) return null;
+  return phrase;
+}
+
+const DISLIKE_RE =
+  /\b((?:do|did|does)(?: ?n'?t| not)(?: really)? (like|love|enjoy|want)|not a fan|(hate|hated|dislike|disliked))\b/i;
+const POINTS_AT_IT_RE = /\b(it|that|this|this one|that one)\b/i;
+
+/**
+ * A guest turning against a dish -- "I don't like it", "the pasta was too
+ * bland". When that dish is on their order, the concierge asks whether to take
+ * it off rather than removing it on the strength of a complaint.
+ */
+export function isDislike(message: string): boolean {
+  if (DISLIKE_RE.test(message)) return true;
+  return isReview(message) && reviewSentiment(message) === "negative";
+}
+
+/** "I don't like it" names no dish and means the one they just ordered. */
+export function pointsAtIt(message: string): boolean {
+  return POINTS_AT_IT_RE.test(message);
+}
+
 const OCCASION_RE =
   /\b(it'?s|its|it is|my|our|his|her|their|wife'?s|husband'?s|friend'?s|we'?re celebrating|celebrating)\b.{0,20}\b(birthday|b'?day|bday|anniversary)\b|\b(birthday|anniversary)\b.{0,15}\b(today|tonight|dinner|celebration)\b/i;
 const FAREWELL_RE =
@@ -124,6 +213,8 @@ export function detectTopic(message: string): ConciergeTopic {
   if (RESERVATION_RE.test(message) && !HAVE_BOOKING_RE.test(message)) return "reservation";
   if (MUSIC_RE.test(message)) return "music_request";
   if (CAPTAIN_RE.test(message)) return "call_captain";
+  // Before feedback: "feedback: the pasta was bland" has already given it.
+  if (isReview(message)) return "review";
   if (FEEDBACK_RE.test(message)) return "feedback";
   if (OCCASION_RE.test(message)) return "occasion";
   if (FAREWELL_RE.test(message)) return "farewell";

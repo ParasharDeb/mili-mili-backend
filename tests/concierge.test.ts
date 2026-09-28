@@ -5,6 +5,8 @@ import {
   detectHardStop,
   detectTopic,
   parseReservation,
+  reviewedDish,
+  reviewSentiment,
 } from "../src/domain/concierge.detect.ts";
 import { getSession, type Session } from "../src/lib/session.ts";
 import { handleConcierge, type ConciergeStore } from "../src/services/concierge.service.ts";
@@ -18,13 +20,19 @@ import { routeHeuristic, type Route } from "../src/services/menu.route.service.t
  */
 
 type Logged = { type: string; message: string; details?: Record<string, unknown> };
+type Reviewed = { message: string; sentiment: string; dish: string | null };
 
-function fakeStore(): ConciergeStore & { logged: Logged[]; feedback: unknown[] } {
+function fakeStore(): ConciergeStore & { logged: Logged[]; feedback: unknown[]; reviews: Reviewed[] } {
   const logged: Logged[] = [];
   const feedback: unknown[] = [];
+  const reviews: Reviewed[] = [];
   return {
     logged,
     feedback,
+    reviews,
+    async logReview(row) {
+      reviews.push({ message: row.message, sentiment: row.sentiment, dish: row.dish });
+    },
     async logRequest(row) {
       logged.push({ type: row.type, message: row.message, details: row.details });
     },
@@ -243,5 +251,142 @@ describe("the name", () => {
     const out = await handleConcierge("hello", session, route("hello"), guest, store);
     expect(answerOf(out)).toBe(copy.LONG_GAP);
     expect(await handleConcierge("hello", session, route("hello"), guest, store)).toBeNull();
+  });
+});
+
+describe("reviews said in passing", () => {
+  test.each([
+    ["the pasta was too bland", "negative", "pasta"],
+    ["The butter chicken was amazing.", "positive", "butter chicken"],
+    ["loved the paneer tikka", "positive", "paneer tikka"],
+    ["the naan was a bit dry", "negative", "naan"],
+    ["the dal wasn't great", "negative", "dal"],
+    ["the cocktail was not that good", "negative", "cocktail"],
+    ["great naan but the dal was too salty", "mixed", null],
+    ["the food was cold", "negative", null],
+    ["service was slow", "negative", null],
+  ])("%p is a %s review", (message, sentiment, dish) => {
+    expect(detectTopic(message)).toBe("review");
+    expect(reviewSentiment(message)).toBe(sentiment as never);
+    if (dish) expect(reviewedDish(message)?.toLowerCase()).toBe(dish);
+  });
+
+  test.each([
+    "is the pasta bland?",
+    "is the biryani very hot",
+    "something not too spicy",
+    "suggest a dish that is spicy",
+    "I want something light",
+    "what is in the butter naan",
+    "which one is the best",
+  ])("%p is not a review", (message) => {
+    expect(detectTopic(message)).not.toBe("review");
+  });
+
+  test("a present-tense problem is still an issue for the floor, not a review", () => {
+    expect(detectTopic("the food is cold")).toBe("issue");
+  });
+
+  test("the pasta was too bland is stored and thanked for", async () => {
+    const out = await turn("the pasta was too bland");
+    expect(store.reviews).toEqual([{ message: "the pasta was too bland", sentiment: "negative", dish: "pasta" }]);
+    expect(answerOf(out)).toBe(copy.REVIEW_THANKS.negative);
+    expect(out && "reply" in out && out.reply.action).toBe("review_logged");
+    expect(out && "reply" in out && out.reply.chips).toEqual([...copy.REVIEW_NEGATIVE_CHIPS]);
+  });
+
+  test("praise gets no captain offer", async () => {
+    const out = await turn("loved the biryani");
+    expect(store.reviews[0]?.sentiment).toBe("positive");
+    expect(out && "reply" in out && out.reply.chips).toEqual([]);
+  });
+
+  test("a review riding with a request is stored, and the request still gets dishes", async () => {
+    const message = "the pasta was bland, something spicier";
+    const r: Route = { ...route(message), conciergeTopic: "review", intent: "structured_query", reviewSentiment: "negative" };
+    const out = await handleConcierge(message, session, r, null, store);
+    expect(store.reviews).toHaveLength(1);
+    expect(out).toEqual({ preface: copy.REVIEW_NOTED });
+  });
+
+  test("a failed write still thanks the guest", async () => {
+    store.logReview = async () => {
+      throw new Error("db down");
+    };
+    expect(answerOf(await turn("the pasta was too bland"))).toBe(copy.REVIEW_THANKS.negative);
+  });
+});
+
+describe("disliking a dish on the order", () => {
+  const onOrder = (name: string, itemId: string, addedAt: number) =>
+    session.cart.push({ itemId, name, qty: 1, unitPrice: 100, addedAt });
+  const reply = (o: Awaited<ReturnType<typeof turn>>) => (o && "reply" in o ? o.reply : null);
+
+  beforeEach(() => {
+    onOrder("Butter Naan", "naan", 1);
+    onOrder("Grilled Chicken Cheese Pasta", "pasta", 2);
+  });
+
+  test.each(["i dont like it", "I don't like it", "I don't like the pasta", "the pasta was too bland"])(
+    "%p asks before removing, and removes nothing yet",
+    async (message) => {
+      const out = reply(await turn(message));
+      expect(out?.answer).toBe(copy.REMOVE_CONFIRM("Grilled Chicken Cheese Pasta"));
+      expect(out?.chips).toEqual([...copy.REMOVE_BUTTONS]);
+      expect(out?.removeItemId).toBeUndefined();
+      expect(session.pendingRemoval?.itemId).toBe("pasta");
+      expect(store.reviews).toEqual([]);
+    },
+  );
+
+  test("'it' means the dish added last; a named dish means that one", async () => {
+    await turn("I don't like the naan");
+    expect(session.pendingRemoval?.itemId).toBe("naan");
+  });
+
+  test.each(["Yes, remove it", "yes", "please remove it"])("%p removes it and files no review", async (answer) => {
+    await turn("i dont like it");
+    const out = reply(await turn(answer));
+    expect(out?.removeItemId).toBe("pasta");
+    expect(out?.answer).toBe(copy.REMOVE_DONE("Grilled Chicken Cheese Pasta"));
+    expect(store.reviews).toEqual([]);
+    expect(session.pendingRemoval).toBeNull();
+  });
+
+  test.each(["No, keep it", "no", "no, don't remove it", "leave it"])(
+    "%p keeps it and files the dislike as a review",
+    async (answer) => {
+      await turn("i dont like it");
+      const out = reply(await turn(answer));
+      expect(out?.removeItemId).toBeUndefined();
+      expect(out?.answer).toBe(copy.REMOVE_KEPT);
+      expect(store.reviews).toEqual([
+        { message: "i dont like it", sentiment: "negative", dish: "Grilled Chicken Cheese Pasta" },
+      ]);
+    },
+  );
+
+  test("changing the subject keeps the dish, files the review, and answers the new message", async () => {
+    await turn("i dont like it");
+    const out = await turn("can you play some jazz");
+    expect(reply(out)?.action).toBe("music_requested");
+    expect(store.reviews).toHaveLength(1);
+    expect(session.pendingRemoval).toBeNull();
+  });
+
+  test("a dislike of something not on the order is just a review", async () => {
+    const out = reply(await turn("the biryani was too salty"));
+    expect(out?.action).toBe("review_logged");
+    expect(session.pendingRemoval).toBeFalsy();
+  });
+
+  test("with an empty order, 'I don't like it' is just a review", async () => {
+    session.cart = [];
+    const out = reply(await turn("i dont like it"));
+    expect(out?.action).toBe("review_logged");
+  });
+
+  test("a preference is not a complaint", async () => {
+    expect(reply(await turn("I don't like spicy food"))?.action).not.toBe("remove_confirm");
   });
 });

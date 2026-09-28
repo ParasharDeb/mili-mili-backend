@@ -133,6 +133,27 @@ export async function chat(
   // The floor before the menu: a hard stop, a complaint or a booking must never
   // be answered with dishes.
   const concierge = await handleConcierge(input.message, session, route, guest);
+  if (concierge && "reply" in concierge && concierge.reply.removeItemId) {
+    // The guest said yes to taking a disliked dish off. Answered as a cart
+    // change, so the drawer updates like any other removal.
+    const { answer, chips, removeItemId } = concierge.reply;
+    try {
+      cart.remove(session, removeItemId);
+    } catch {
+      // Already gone -- removed from the drawer while we were asking.
+    }
+    recordTurn(session, "bot", answer.slice(0, 160));
+    return {
+      kind: "cart",
+      query: input.message,
+      action: "removed",
+      answer,
+      changed: await hydrate([removeItemId]),
+      cart: await cart.view(session),
+      chips,
+      meta: meta({ route: "concierge:remove_confirmed" }),
+    };
+  }
   if (concierge && "reply" in concierge) {
     const { answer, chips, action, muted } = concierge.reply;
     const result: ChatResult = {

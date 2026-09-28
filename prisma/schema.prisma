@@ -234,3 +234,28 @@ model Feedback {
   @@index([escalate, createdAt])
   @@map("feedback")
 }
+
+enum ReviewSentimentEnum {
+  positive
+  negative
+  mixed
+}
+
+/// An opinion said in passing in the chat -- "the pasta was too bland" -- as
+/// opposed to the rated form in `feedback`. Stored in the guest's own words.
+model Review {
+  id        String              @id @default(uuid())
+  sessionId String              @map("session_id")
+  userId    String?             @map("user_id")
+  message   String
+  sentiment ReviewSentimentEnum
+  /// The dish it is about, when the words name one. Kept as text too, so the
+  /// review still reads right after the menu row is renamed or removed.
+  itemId    String?             @map("item_id")
+  itemName  String?             @map("item_name")
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([sentiment, createdAt])
+  @@map("reviews")
+}

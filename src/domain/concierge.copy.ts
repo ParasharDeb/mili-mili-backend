@@ -47,6 +47,26 @@ export const MANAGER_YES = "Our manager is on the way to your table.";
 export const MANAGER_NO =
   "Understood. I've passed it on regardless, and someone will look at it tonight. Thank you for telling us.";
 
+/** A verdict said in passing -- "the pasta was too bland". Stored, then thanked for. */
+export const REVIEW_THANKS = {
+  positive: "That's lovely to hear. I'll pass it on to the kitchen -- they'll be glad.",
+  negative:
+    "Thank you for telling me, and I'm sorry it wasn't right. I've passed it to the kitchen. " +
+    "If you'd like someone to look at it now, I can ask your captain to come over.",
+  mixed: "Thank you -- that's genuinely useful. I've passed all of it on to the kitchen.",
+} as const;
+export const REVIEW_NEGATIVE_CHIPS = ["Call my captain", "It's fine, thanks"] as const;
+/** A dislike of a dish that is on the order. Nothing leaves the order without a yes. */
+export const REMOVE_CONFIRM = (name: string) =>
+  `I'm sorry the ${name} isn't to your liking. Would you like me to take it off your order?`;
+export const REMOVE_BUTTONS = ["Yes, remove it", "No, keep it"] as const;
+export const REMOVE_DONE = (name: string) => `Done -- I've taken the ${name} off your order.`;
+export const REMOVE_KEPT =
+  "No problem, it stays on your order. I've passed what you said on to the kitchen.";
+
+/** Said ahead of a menu answer when the review came with a request. */
+export const REVIEW_NOTED = "Thank you -- I've passed that on to the kitchen.";
+
 export const OCCASION = {
   birthday: (name: string | null) =>
     `Happy birthday${name ? `, ${name}` : ""}. We're glad you chose to spend it with us.`,

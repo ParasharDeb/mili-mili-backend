@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { adminAuthRouter } from "./admin.auth.routes.ts";
+import { adminRouter } from "./admin.routes.ts";
 import { userAuthRouter } from "./user.auth.routes.ts";
 import { cartRouter } from "./cart.routes.ts";
 import { menuRouter } from "./menu.routes.ts";
@@ -16,6 +17,9 @@ apiRouter.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 apiRouter.use("/auth/admin", adminAuthRouter);
 apiRouter.use("/auth/user", userAuthRouter);
+
+// Staff-only views. Signed in via POST /api/auth/admin/login.
+apiRouter.use("/admin", adminRouter);
 apiRouter.get("/auth/me", requireAuth, me);
 apiRouter.patch("/auth/me/preferences", requireAuth, validateBody(preferencesSchema), updatePreferences);
 

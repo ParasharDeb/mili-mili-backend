@@ -3,6 +3,7 @@ import {
   detectAnger,
   detectHardStop,
   detectTopic,
+  reviewSentiment,
   type ConciergeTopic,
   type HardStopCategory,
 } from "../domain/concierge.detect.ts";
@@ -48,7 +49,11 @@ export type Route = {
   /** Non-null means a human takes the table now. */
   hardStop: HardStopCategory | null;
   angry: boolean;
+  /** How a review leans. Only read when `conciergeTopic` is "review". */
+  reviewSentiment: ReviewSentiment;
 };
+
+export type ReviewSentiment = "positive" | "negative" | "mixed";
 
 const ROUTE_QUESTIONS = {
   intent: choice(
@@ -115,12 +120,20 @@ const ROUTE_QUESTIONS = {
       call_captain: "They want their captain, a waiter or a member of staff to come to the table.",
       reservation: "They want to book or reserve a table for a future date or time.",
       music_request: "They are asking for a song, artist or kind of music to be played.",
-      feedback: "They want to give feedback, a review or a rating about their evening.",
+      feedback: "They want to give feedback, a review or a rating about their evening, but have not yet said what it is.",
+      review:
+        "They are giving their opinion of a dish, a drink or the service they have already had -- a verdict, not a question and not a request. Examples: 'the pasta was too bland', 'loved the butter chicken', 'the naan was a bit dry', 'service was great tonight'.",
       occasion: "They mention that they are celebrating an occasion tonight -- a birthday, an anniversary, a promotion.",
       waiting_for_friends: "They are waiting for the rest of their party to arrive.",
       farewell: "They are saying goodbye, leaving, or thanking the restaurant for the evening.",
     },
   ),
+
+  review_sentiment: choice("If the guest's latest message gives an opinion of food, drink or service, which way does it lean?", {
+    positive: "They liked it.",
+    negative: "They did not like it, or something about it was wrong -- too bland, too salty, cold, dry, slow.",
+    mixed: "They liked some of it and not other parts.",
+  }),
 
   hard_stop: noul(
     "The guest's latest message reports something a human manager must handle personally, at once: feeling ill or food poisoning, an allergic reaction, something foreign in the food (hair, glass, an insect), an injury, an allegation about a staff member's conduct, a dispute about the bill or a charge, or a mention of police, lawyers, the media, or posting about this publicly. Asking whether a dish contains an allergen is NOT this.",
@@ -210,6 +223,7 @@ export function routeHeuristic(message: string, session: Session): Route {
     conciergeTopic: detectTopic(message),
     hardStop: detectHardStop(message),
     angry: detectAnger(message),
+    reviewSentiment: reviewSentiment(message),
   };
 }
 
@@ -248,6 +262,7 @@ export async function classify(message: string, session: Session): Promise<Route
       ? (topicAnswer.choice as ConciergeTopic)
       : detectTopic(message);
   const angry = isTrue(answers.angry) || detectAnger(message);
+  const sentiment = decided<ReviewSentiment>(answers.review_sentiment, reviewSentiment(message));
 
   const intentAnswer = answers.intent;
   // An unconfident five-way partition is worse than the regex, which at least
@@ -260,6 +275,7 @@ export async function classify(message: string, session: Session): Promise<Route
       conciergeTopic,
       hardStop,
       angry,
+      reviewSentiment: sentiment,
     };
   }
 
@@ -286,6 +302,7 @@ export async function classify(message: string, session: Session): Promise<Route
     conciergeTopic,
     hardStop,
     angry,
+    reviewSentiment: sentiment,
   };
 }
 

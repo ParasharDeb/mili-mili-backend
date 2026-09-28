@@ -74,6 +74,11 @@ export type Session = {
   /** "Would you like our manager to come to your table?" is awaiting a yes or no. */
   pendingManagerOffer?: boolean;
   /**
+   * "Would you like me to take the pasta off your order?" is awaiting a yes or
+   * no. Yes removes it; no keeps it and files `message` as a review instead.
+   */
+  pendingRemoval?: { itemId: string; name: string; message: string } | null;
+  /**
    * The one "bread or rice with that?" of the visit. Present once asked, and it
    * is never asked again; `pending` only while the guest has not yet replied.
    */

@@ -1,12 +1,17 @@
 import * as copy from "../domain/concierge.copy.ts";
 import {
+  isDislike,
   occasionKind,
+  pointsAtIt,
   parseReservation,
+  reviewAsksForDishes,
+  reviewedDish,
+  reviewSentiment,
   type HardStopCategory,
   type ReservationField,
 } from "../domain/concierge.detect.ts";
 import { env } from "../lib/env.ts";
-import type { PendingReservation, Session } from "../lib/session.ts";
+import type { CartLine, PendingReservation, Session } from "../lib/session.ts";
 import {
   prismaFeedbackStore,
   submitFeedback,
@@ -14,7 +19,7 @@ import {
   type FeedbackStore,
   type Guest,
 } from "./feedback.service.ts";
-import type { Route } from "./menu.route.service.ts";
+import type { ReviewSentiment, Route } from "./menu.route.service.ts";
 
 /**
  * Everything the guest asks of the floor rather than of the menu.
@@ -36,6 +41,8 @@ export type ConciergeReply = {
   action?: string;
   /** The assistant is silent from here on; a human has the table. */
   muted?: boolean;
+  /** The guest said yes to taking this dish off the order. The chat service removes it. */
+  removeItemId?: string;
 };
 
 export type ConciergeOutcome = { reply: ConciergeReply } | { preface: string } | null;
@@ -51,6 +58,14 @@ export type ConciergeStore = FeedbackStore & {
     details?: Record<string, unknown>;
   }): Promise<void>;
   touchVisit(userId: string): Promise<void>;
+  /** `dish` is the guest's words for it; the store links it to a menu row if it can. */
+  logReview(row: {
+    sessionId: string;
+    userId: string | null;
+    message: string;
+    sentiment: ReviewSentiment;
+    dish: string | null;
+  }): Promise<void>;
 };
 
 export const prismaConciergeStore: ConciergeStore = {
@@ -72,6 +87,26 @@ export const prismaConciergeStore: ConciergeStore = {
   async touchVisit(userId) {
     const { prisma } = await import("../../db/index.ts");
     await prisma.user.update({ where: { id: userId }, data: { lastVisitAt: new Date() } });
+  },
+
+  async logReview(row) {
+    const { prisma } = await import("../../db/index.ts");
+    const { resolveDish } = await import("./menu.sql.service.ts");
+    // "pasta" with four pastas on the menu is left as the guest's word rather
+    // than pinned on one of them -- a review filed against the wrong dish is
+    // worse than one filed against none.
+    const match = row.dish ? await resolveDish(row.dish).catch(() => null) : null;
+    const item = match?.status === "resolved" ? match.item : null;
+    await prisma.review.create({
+      data: {
+        sessionId: row.sessionId,
+        userId: row.userId,
+        message: row.message,
+        sentiment: row.sentiment,
+        itemId: item?.id ?? null,
+        itemName: item?.name ?? row.dish,
+      },
+    });
   },
 };
 
@@ -118,6 +153,13 @@ export async function handleConcierge(
       console.warn(`[concierge] could not log ${type}: ${err instanceof Error ? err.message : err}`);
     }
   };
+  const saveReview = async (words: string, sentiment: ReviewSentiment, dish: string | null) => {
+    try {
+      await store.logReview({ sessionId: session.id, userId: guest?.userId ?? null, message: words, sentiment, dish });
+    } catch (err) {
+      console.warn(`[concierge] could not log review: ${err instanceof Error ? err.message : err}`);
+    }
+  };
 
   /* ---- 1. hard stop: say one line, then go silent ---------------------- */
 
@@ -126,11 +168,38 @@ export async function handleConcierge(
     session.mutedAt = Date.now();
     session.pendingReservation = null;
     session.pendingManagerOffer = false;
+    session.pendingRemoval = null;
     await log("hard_stop", { category });
     return reply(copy.HANDOFF, [], { action: "handoff", muted: true });
   }
 
   /* ---- 2. answers to something we just asked ---------------------------- */
+
+  if (session.pendingRemoval) {
+    const pending = session.pendingRemoval;
+    session.pendingRemoval = null;
+    // "No" is read first: "no, don't remove it" contains "remove".
+    const keep =
+      said(message, copy.REMOVE_BUTTONS[1]) ||
+      NO_RE.test(message) ||
+      /\b(keep|leave|do ?n'?t|do not)\b/i.test(message);
+    const remove =
+      !keep &&
+      (said(message, copy.REMOVE_BUTTONS[0]) || YES_RE.test(message) || /\b(remove|take it off)\b/i.test(message));
+    if (remove) {
+      return reply(copy.REMOVE_DONE(pending.name), ["Show my order", "What else do you have?"], {
+        action: "remove_confirmed",
+        removeItemId: pending.itemId,
+      });
+    }
+    // Anything but a yes keeps the dish, and what they said becomes a review.
+    const sentiment = reviewSentiment(pending.message);
+    await saveReview(pending.message, sentiment === "positive" ? "negative" : sentiment, pending.name);
+    if (keep) {
+      return reply(copy.REMOVE_KEPT, [], { action: "review_logged" });
+    }
+    // They moved on without answering. The dish stays; this message is read afresh.
+  }
 
   if (session.pendingManagerOffer) {
     session.pendingManagerOffer = false;
@@ -179,7 +248,16 @@ export async function handleConcierge(
     return reply(copy.ANGER_APOLOGY, [], { action: "issue_logged" });
   }
 
-  /* ---- 4. requests of the floor ---------------------------------------- */
+  /* ---- 4. a dish on the order they have turned against ----------------- */
+
+  // Asked, never done: a complaint is not an instruction to change the bill.
+  const disliked = isDislike(message) ? dislikedCartLine(message, session) : null;
+  if (disliked) {
+    session.pendingRemoval = { itemId: disliked.itemId, name: disliked.name, message };
+    return reply(copy.REMOVE_CONFIRM(disliked.name), [...copy.REMOVE_BUTTONS], { action: "remove_confirm" });
+  }
+
+  /* ---- 5. requests of the floor ---------------------------------------- */
 
   const prefaces: string[] = [];
   const standalone = route.intent === "smalltalk";
@@ -212,6 +290,17 @@ export async function handleConcierge(
         action: "feedback_ask",
       });
 
+    case "review": {
+      await saveReview(message, route.reviewSentiment, reviewedDish(message));
+      // "The pasta was bland -- something spicier?" still gets its dishes.
+      if (reviewAsksForDishes(message)) {
+        prefaces.push(copy.REVIEW_NOTED);
+        break;
+      }
+      const chips = route.reviewSentiment === "negative" ? [...copy.REVIEW_NEGATIVE_CHIPS] : [];
+      return reply(copy.REVIEW_THANKS[route.reviewSentiment], chips, { action: "review_logged" });
+    }
+
     case "farewell":
       if (session.delights?.farewell) return reply(copy.FAREWELL_AGAIN);
       session.delights = { ...session.delights, farewell: true };
@@ -239,7 +328,7 @@ export async function handleConcierge(
       break;
   }
 
-  /* ---- 5. a returning guest who has been away a long time --------------- */
+  /* ---- 6. a returning guest who has been away a long time --------------- */
 
   if (guest && !session.delights?.longGap) {
     session.delights = { ...session.delights, longGap: true };
@@ -256,6 +345,30 @@ export async function handleConcierge(
   }
 
   return prefaces.length ? { preface: prefaces.join(" ") } : null;
+}
+
+/* ---------------------------------------------------------------- dislike -- */
+
+const FILLER = new Set(["the", "this", "that", "one", "your", "our", "my"]);
+
+/**
+ * The order line a dislike is about: the one it names, or -- for "I don't like
+ * it" -- the dish added most recently. Null when it names nothing on the order,
+ * in which case it is just a review.
+ */
+export function dislikedCartLine(message: string, session: Session): CartLine | null {
+  if (session.cart.length === 0) return null;
+  const newest = [...session.cart].sort((a, b) => b.addedAt - a.addedAt);
+  const phrase = reviewedDish(message);
+  if (!phrase) return pointsAtIt(message) ? newest[0]! : null;
+
+  const words = phrase
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((w) => w.length > 2 && !FILLER.has(w))
+    .map((w) => w.replace(/e?s$/, ""));
+  if (words.length === 0) return pointsAtIt(message) ? newest[0]! : null;
+  return newest.find((line) => words.every((w) => line.name.toLowerCase().includes(w))) ?? null;
 }
 
 /* ------------------------------------------------------------ reservation -- */
