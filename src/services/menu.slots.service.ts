@@ -274,7 +274,9 @@ export function buildLabel(slot: Omit<Slot, "label" | "searchText">): string {
       ? slot.drinkStyle ?? "alcoholic drink"
       : slot.course === "Beverage"
         ? "non-alcoholic drink"
-        : slot.course !== "any" ? slot.course.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase() : "",
+        : slot.course !== "any"
+          ? slot.course.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()
+          : slot.courseGroup === "drink" ? "drink" : "",
   ].filter(Boolean);
   return bits.join(" ").trim() || "Anything";
 }

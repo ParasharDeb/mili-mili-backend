@@ -8,8 +8,8 @@ import type { Session } from "../src/lib/session.ts";
  * next message whatever it says.
  */
 
-const session = (followUp: Session["followUp"]): Session =>
-  ({ id: "s", createdAt: 0, lastSeenAt: 0, turns: [], lastOffer: null, cart: [], followUp }) as Session;
+const session = (followUp: Session["followUp"], drinkFollowUp: Session["drinkFollowUp"] = null): Session =>
+  ({ id: "s", createdAt: 0, lastSeenAt: 0, turns: [], lastOffer: null, cart: [], followUp, drinkFollowUp }) as Session;
 
 describe("isDecline", () => {
   test.each(["no", "No thanks", "no thank you", "nah", "Nope.", "I'm good", "that's all", "not now", "skip"])(
@@ -28,24 +28,39 @@ describe("isDecline", () => {
 describe("settleFollowUp", () => {
   test("a no is taken at once and the question closes", () => {
     const s = session({ askedAt: 1, pending: true });
-    expect(settleFollowUp(s, "No thanks")).toBe(true);
+    expect(settleFollowUp(s, "No thanks")).toBe("side");
     expect(s.followUp?.pending).toBe(false);
   });
 
   test("moving on without answering also closes it", () => {
     const s = session({ askedAt: 1, pending: true });
-    expect(settleFollowUp(s, "what desserts do you have?")).toBe(false);
+    expect(settleFollowUp(s, "what desserts do you have?")).toBeNull();
     expect(s.followUp?.pending).toBe(false);
   });
 
   test("a no with nothing asked is not intercepted", () => {
-    expect(settleFollowUp(session(null), "no")).toBe(false);
-    expect(settleFollowUp(session({ askedAt: 1, pending: false }), "no")).toBe(false);
+    expect(settleFollowUp(session(null), "no")).toBeNull();
+    expect(settleFollowUp(session({ askedAt: 1, pending: false }), "no")).toBeNull();
   });
 
   test("the question stays spent, so it is never asked twice", () => {
     const s = session({ askedAt: 1, pending: true });
     settleFollowUp(s, "no");
     expect(s.followUp).not.toBeNull();
+  });
+});
+
+describe("the drink question", () => {
+  test("a no to the drink is told apart from a no to the bread", () => {
+    const s = session({ askedAt: 1, pending: false }, { askedAt: 2, pending: true });
+    expect(settleFollowUp(s, "no thanks")).toBe("drink");
+    expect(s.drinkFollowUp?.pending).toBe(false);
+  });
+
+  test("it stays spent once answered", () => {
+    const s = session(null, { askedAt: 2, pending: true });
+    settleFollowUp(s, "what desserts do you have?");
+    expect(s.drinkFollowUp).not.toBeNull();
+    expect(settleFollowUp(s, "no")).toBeNull();
   });
 });

@@ -83,6 +83,8 @@ export type Session = {
    * is never asked again; `pending` only while the guest has not yet replied.
    */
   followUp?: { askedAt: number; pending: boolean } | null;
+  /** The one "something to drink?" of the visit, offered once food is in. Same rules. */
+  drinkFollowUp?: { askedAt: number; pending: boolean } | null;
 };
 
 export type PendingReservation = {

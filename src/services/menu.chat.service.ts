@@ -12,7 +12,7 @@ import { handleConcierge } from "./concierge.service.ts";
 import type { Guest } from "./feedback.service.ts";
 import { composeCombos, type Combo } from "./menu.combo.service.ts";
 import * as cart from "./menu.cart.service.ts";
-import { followUpFor, settleFollowUp, type FollowUp } from "./menu.followup.service.ts";
+import { drinkFollowUp, followUpFor, isDecline, settleFollowUp, type FollowUp } from "./menu.followup.service.ts";
 import type { PublicItem } from "./menu.items.service.ts";
 import { nameKey, quantityIn, resolve } from "./menu.reference.ts";
 import { recommend } from "./menu.recommend.service.ts";
@@ -171,9 +171,25 @@ export async function chat(
   }
   const preface = concierge?.preface;
 
-  // "Bread with that?" -- "No thanks." That is the end of it: an acknowledgement,
-  // no second suggestion and no reason to reconsider.
-  if (settleFollowUp(session, input.message)) {
+  // "Bread with that?" -- "No thanks." That is the end of the bread: no second
+  // bread and no reason to reconsider. The drink is a different question, asked
+  // once if it has not been yet; a no to the drink ends everything.
+  const declined = settleFollowUp(session, input.message);
+  const nextUp = declined === "side" ? await drinkFollowUp(session) : null;
+  if (nextUp) {
+    const answer = `No problem. ${nextUp.question}`;
+    recordTurn(session, "bot", answer.slice(0, 160));
+    return {
+      kind: "answer",
+      query: input.message,
+      answer,
+      dishes: nextUp.options,
+      chips: nextUp.chips,
+      meta: meta({ route: "follow_up:drink" }),
+    };
+  }
+  // A bare "no thanks" with nothing open is still a no -- not a dish called "thanks".
+  if (declined || isDecline(input.message)) {
     const answer = "No problem.";
     recordTurn(session, "bot", answer);
     return {
@@ -181,7 +197,10 @@ export async function chat(
       query: input.message,
       answer,
       dishes: [],
-      chips: ["Show my order", "Something to drink", "What else do you have?"],
+      chips:
+        declined === "drink"
+          ? ["Show my order", "What else do you have?"]
+          : ["Show my order", "Something to drink", "What else do you have?"],
       meta: meta({ route: "follow_up:declined" }),
     };
   }
@@ -196,8 +215,16 @@ export async function chat(
   // Likewise "suggest some alcoholic drinks": alcoholic vs not is a hard filter
   // the advice path cannot apply, and it would hand back mocktails.
   const heuristicSlots = route.intent === "advisory" ? heuristicPlan(input.message).slots : [];
+  // A plain "suggest me some drinks" names no course ("drink" means either
+  // kind), so it has to be caught on the drink group too -- otherwise it goes to
+  // the combo composer, which builds food and says there is no drink.
+  const drinksOnly =
+    heuristicSlots.length > 0 &&
+    heuristicSlots.every((s) => s.courseGroup === "drink") &&
+    !FOOD_TOO_RE.test(input.message);
   const isSeatingPlan =
     heuristicSlots.length > 1 ||
+    drinksOnly ||
     heuristicSlots.some((s) => s.course === "Alcohol" || s.course === "Beverage");
 
   const result = isCart
@@ -215,6 +242,9 @@ export async function chat(
   recordTurn(session, "bot", summarise(result));
   return result;
 }
+
+/** A drinks request that also wants food composed around it -- "a combo with drinks". */
+const FOOD_TOO_RE = /\b(combos?|combination|meals?|food|dish(es)?|eat|starters?|mains?|dessert)\b/i;
 
 /**
  * Puts a warm line ("Happy birthday") ahead of the menu answer. Recommendations

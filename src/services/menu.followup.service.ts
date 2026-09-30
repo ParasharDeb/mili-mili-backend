@@ -6,16 +6,20 @@ import { toPublicItem, type PublicItem } from "./menu.items.service.ts";
 import { nameKey } from "./menu.reference.ts";
 
 /**
- * "Would you like some bread with that?" -- asked once, and only once.
+ * "Would you like some bread with that?" and "something to drink?" -- each
+ * asked once, and only once.
  *
- * The one upsell the assistant makes. It is a question, not a pitch: it fires
- * the first time a main goes into the order without anything to eat it with,
- * names at most two things that actually go with it, and never comes back. A
- * "no" is taken at once, and so is silence -- a guest who moves on without
- * answering has answered. A waiter who asks twice is a waiter you avoid.
+ * The two upsells the assistant makes. They are questions, not pitches: the
+ * bread or rice fires the first time a main goes into the order without
+ * anything to eat it with; the drink fires the first time food goes in while
+ * the order has nothing to drink. One question per turn, each names at most two
+ * things, and neither comes back. A "no" is taken at once, and so is silence --
+ * a guest who moves on without answering has answered. A waiter who asks twice
+ * is a waiter you avoid.
  */
 
 export type FollowUp = {
+  kind: "side" | "drink";
   question: string;
   options: PublicItem[];
   chips: string[];
@@ -50,6 +54,13 @@ const COMPATIBLE_DIETS: Record<string, DietPrefEnum[]> = {
   NonVegetarian: ["Vegetarian", "Jain", "Eggetarian", "OnlyFish", "NonVegetarian"],
 };
 
+const DRINK_COURSES = new Set(["Beverage", "Alcohol", "Shisha"]);
+
+const isDrink = (item: Pick<PublicItem, "course">) => DRINK_COURSES.has(item.course);
+
+/** A pour or a bottle -- "Old Monk (30ml)", "Kingfisher (btl)". Not something to suggest with dinner. */
+const MEASURE_RE = /\(\s*(\d+\s*ml|btl|bottle|pint)\s*\)/i;
+
 function isAccompaniment(item: Pick<PublicItem, "course" | "name">): boolean {
   return item.course === "Bread" || (item.course === "MainCourse" && RICE_RE.test(item.name));
 }
@@ -61,20 +72,37 @@ export function isDecline(message: string): boolean {
 /**
  * The follow-up for dishes that were just added, or null.
  *
- * Returning one spends it: the session is marked so it is never asked again,
- * and the options become the last offer, so "yes, the kulcha" or "the first
- * one" resolve against them on the next turn.
+ * Bread or rice comes first, since it belongs to the dish; the drink waits for
+ * the next add, or for the guest to decline the bread. Returning one spends it:
+ * the session is marked so it is never asked again, and the options become the
+ * last offer, so "yes, the kulcha" or "the first one" resolve against them on
+ * the next turn.
  */
 export async function followUpFor(session: Session, added: PublicItem[]): Promise<FollowUp | null> {
-  if (session.followUp) return null;
+  // Adding something answers whatever was open -- tapping "+ Add" on the naan
+  // card is a yes that never passes through the chat to settle it.
+  if (session.followUp?.pending) session.followUp.pending = false;
+  if (session.drinkFollowUp?.pending) session.drinkFollowUp.pending = false;
 
   const current = await cart.view(session);
   const inCart = new Set(current.lines.map((l) => l.item.id));
 
-  // Only a main that really made it into the order -- a failed add asks nothing.
-  const anchor = added.find(
-    (i) => inCart.has(i.id) && i.course === "MainCourse" && !SELF_CONTAINED_RE.test(i.name),
-  );
+  // Only food that really made it into the order -- a failed add asks nothing,
+  // and a drink going in is the answer to the drink question, not a reason for one.
+  const food = added.filter((i) => inCart.has(i.id) && !isDrink(i));
+  if (food.length === 0) return null;
+
+  return (await sideFollowUp(session, food, current)) ?? (await drinkFollowUp(session, current));
+}
+
+async function sideFollowUp(
+  session: Session,
+  food: PublicItem[],
+  current: cart.CartView,
+): Promise<FollowUp | null> {
+  if (session.followUp) return null;
+
+  const anchor = food.find((i) => i.course === "MainCourse" && !SELF_CONTAINED_RE.test(i.name));
   if (!anchor) return null;
 
   // Something to eat it with is already on the way.
@@ -100,20 +128,107 @@ export async function followUpFor(session: Session, added: PublicItem[]): Promis
   // Another kitchen's bread is offered only when this one has none at all.
   const all = rows.map(toPublicItem);
   const sameKitchen = all.filter((i) => i.cuisine === anchor.cuisine);
-  const candidates = sameKitchen.length > 0 ? sameKitchen : all;
-
-  const seen = new Set<string>();
-  const options: PublicItem[] = [];
-  for (const item of candidates) {
-    const key = nameKey(item.name);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    options.push(item);
-    if (options.length === 2) break;
-  }
+  const options = distinct(sameKitchen.length > 0 ? sameKitchen : all, 2);
   if (options.length === 0) return null;
 
   session.followUp = { askedAt: Date.now(), pending: true };
+  offer(session, options);
+
+  return {
+    kind: "side",
+    question:
+      `Would you like some ${kind} with the ${anchor.name}? ` +
+      `${capitalise(named(options))} ${options.length > 1 ? "would both" : "would"} go well with it.`,
+    options,
+    // The cards carry their own "+ Add"; the only thing left to say is no.
+    chips: ["No thanks"],
+  };
+}
+
+/**
+ * "Something to drink with that?" -- one soft drink and one from the bar, so a
+ * guest who does not drink alcohol is never offered only cocktails.
+ *
+ * Exported for the chat path, which asks it straight after a "no" to the bread.
+ */
+export async function drinkFollowUp(
+  session: Session,
+  current?: cart.CartView,
+): Promise<FollowUp | null> {
+  if (session.drinkFollowUp) return null;
+
+  const order = current ?? (await cart.view(session));
+  if (order.lines.some((l) => isDrink(l.item))) return null;
+
+  // The dish it is offered with: the latest main, not the rice that came with it.
+  const food = [...order.lines].reverse().filter((l) => !isDrink(l.item));
+  const anchor = (food.find((l) => !isAccompaniment(l.item)) ?? food[0])?.item;
+  if (!anchor) return null;
+
+  // No `take`: the most popular bar rows are all pegs, and a cap cut every
+  // cocktail. The bar is a few hundred rows.
+  const pick = (course: "Beverage" | "Alcohol") =>
+    prisma.item.findMany({
+      where: { isActive: true, isAvailable: true, soldOut: false, course },
+      orderBy: [{ popularity: "desc" }, { price: "asc" }],
+    });
+  const [soft, bar] = await Promise.all([pick("Beverage"), pick("Alcohol")]);
+
+  // A cocktail rather than a 30ml peg or a bottle, where the bar has one.
+  const barItems = bar.map(toPublicItem).filter((i) => !MEASURE_RE.test(i.name));
+  const cocktails = barItems.filter((i) => i.drinkStyle === "cocktail");
+  const options = distinct(
+    [...distinct(soft.map(toPublicItem), 1), ...distinct(cocktails.length ? cocktails : barItems, 1)],
+    2,
+  );
+  if (options.length === 0) return null;
+
+  session.drinkFollowUp = { askedAt: Date.now(), pending: true };
+  offer(session, options);
+
+  return {
+    kind: "drink",
+    question:
+      `Something to drink with the ${anchor.name}? ` +
+      `${capitalise(named(options))} ${options.length > 1 ? "would both" : "would"} go well with it.`,
+    options,
+    chips: ["Show me more drinks", "No thanks"],
+  };
+}
+
+/**
+ * Settles an open follow-up on the guest's next message, whatever it says.
+ *
+ * Returns which question a plain "no" answered, so the caller can acknowledge
+ * it and nothing more. Anything else -- a yes, a dish name, a new question --
+ * returns null and is left to the normal routes.
+ */
+export function settleFollowUp(session: Session, message: string): FollowUp["kind"] | null {
+  const open = session.followUp?.pending
+    ? session.followUp
+    : session.drinkFollowUp?.pending
+      ? session.drinkFollowUp
+      : null;
+  if (!open) return null;
+  open.pending = false;
+  if (!isDecline(message)) return null;
+  return open === session.followUp ? "side" : "drink";
+}
+
+function distinct(items: PublicItem[], max: number): PublicItem[] {
+  const seen = new Set<string>();
+  const out: PublicItem[] = [];
+  for (const item of items) {
+    const key = nameKey(item.name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+    if (out.length === max) break;
+  }
+  return out;
+}
+
+function offer(session: Session, options: PublicItem[]): void {
   recordOffer(
     session,
     "follow_up",
@@ -128,28 +243,12 @@ export async function followUpFor(session: Session, added: PublicItem[]): Promis
       price: item.price,
     })),
   );
-
-  const named = options.map((o) => (o.price != null ? `the ${o.name} (₹${Math.round(o.price)})` : `the ${o.name}`));
-  return {
-    question:
-      `Would you like some ${kind} with the ${anchor.name}? ` +
-      `${capitalise(named.join(" or "))} ${options.length > 1 ? "would both" : "would"} go well with it.`,
-    options,
-    chips: [...options.map((o) => `Add the ${o.name}`), "No thanks"],
-  };
 }
 
-/**
- * Settles an open follow-up on the guest's next message, whatever it says.
- *
- * Returns true when that message was a plain "no", so the caller can answer it
- * with an acknowledgement and nothing more. Anything else -- a yes, a dish
- * name, a new question -- is left to the normal routes.
- */
-export function settleFollowUp(session: Session, message: string): boolean {
-  if (!session.followUp?.pending) return false;
-  session.followUp.pending = false;
-  return isDecline(message);
+function named(options: PublicItem[]): string {
+  return options
+    .map((o) => (o.price != null ? `the ${o.name} (₹${Math.round(o.price)})` : `the ${o.name}`))
+    .join(" or ");
 }
 
 function capitalise(text: string): string {

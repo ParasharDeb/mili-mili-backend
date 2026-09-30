@@ -149,4 +149,10 @@ describe("allowedCourses", () => {
       "Beverage", "Alcohol", "Shisha",
     ]);
   });
+
+  test("a drink slot stays on drinks even when drinks are included", () => {
+    expect(allowedCourses(slot({ courseGroup: "drink" }), true)).toEqual([
+      "Beverage", "Alcohol", "Shisha",
+    ]);
+  });
 });

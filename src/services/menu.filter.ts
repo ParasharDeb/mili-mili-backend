@@ -202,8 +202,10 @@ function styleMatches(wanted: DrinkStyle, actual: DrinkStyle | null): boolean {
 /** The courses a slot is willing to accept, or null when unconstrained. */
 export function allowedCourses(slot: Slot, includeDrinks: boolean): string[] | null {
   if (slot.course !== "any") return [slot.course];
+  // Checked before includeDrinks: "suggest me a drink" also sets wantsDrinks,
+  // and widening here handed back biryani for a drinks request.
+  if (slot.courseGroup === "drink") return [...DRINK_COURSES];
   if (includeDrinks) return null;
   if (slot.courseGroup === "food") return [...FOOD_COURSES];
-  if (slot.courseGroup === "drink") return [...DRINK_COURSES];
   return null;
 }
