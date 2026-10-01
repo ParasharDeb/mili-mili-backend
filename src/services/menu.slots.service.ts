@@ -159,7 +159,7 @@ const COURSE_WORDS: Record<string, Slot["course"]> = {
   // "drink" on its own is deliberately absent: it means either kind, and
   // mapping it to Beverage is how "alcoholic drinks" came back as Coke.
   beverage: "Beverage",
-  shisha: "Shisha", hookah: "Shisha",
+  shisha: "Shisha", sheesha: "Shisha", hookah: "Shisha",
 };
 
 /**
@@ -250,7 +250,7 @@ function courseFromText(chunk: string): Slot["course"] | null {
 }
 
 const DRINK_RE =
-  /cocktail|drink|wine|beer|mocktail|juice|shisha|hookah|whisk(e)?y|vodka|\brum\b|\bgin\b|tequila|alcohol|booz|liquor|spirit|\bshots?\b|beverage/;
+  /cocktail|drink|wine|beer|mocktail|juice|shisha|sheesha|hookah|whisk(e)?y|vodka|\brum\b|\bgin\b|tequila|alcohol|booz|liquor|spirit|\bshots?\b|beverage/;
 
 /* ---------------------------------------------------------- label / text -- */
 

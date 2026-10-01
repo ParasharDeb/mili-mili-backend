@@ -215,7 +215,7 @@ export function routeHeuristic(message: string, session: Session): Route {
     confirmingOffer: hasOffer && AFFIRM_RE.test(message),
     multiConstraint: plan.slots.length > 1,
     namesADish: false,
-    wantsDrinks: /cocktail|drink|wine|beer|mocktail|juice|shisha|hookah|alcohol|booz|liquor|whisk|vodka|\bgin\b|\brum\b|tequila|\bshots?\b/i.test(message),
+    wantsDrinks: /cocktail|drink|wine|beer|mocktail|juice|shisha|sheesha|hookah|alcohol|booz|liquor|whisk|vodka|\bgin\b|\brum\b|tequila|\bshots?\b/i.test(message),
     cartOp,
     referentKind: AFFIRM_RE.test(message) ? "bare_yes" : "by_name",
     mode: "heuristic",
