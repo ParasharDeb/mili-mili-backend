@@ -259,3 +259,49 @@ model Review {
   @@index([sentiment, createdAt])
   @@map("reviews")
 }
+
+/// pending -> accepted | rejected. A guest's order is only placed once a captain
+/// has come to the table and accepted it; until then the kitchen does not cook.
+enum OrderStatusEnum {
+  pending
+  accepted
+  rejected
+  cancelled
+}
+
+/// An order sent from the cart for a captain to confirm at the table.
+///
+/// Unlike the cart, this is a record: it is what the captain acts on and what
+/// KCPL receives, so it lives in Postgres. Lines are a snapshot -- the names and
+/// prices the guest saw when they pressed the button, not a live join.
+model Order {
+  id           String          @id @default(uuid())
+  /// Short, sayable code the captain can read back: "MM-4821".
+  code         String          @unique
+  sessionId    String          @map("session_id")
+  userId       String?         @map("user_id")
+  /// From the table's QR code, or typed. At least one of table / phone is set.
+  tableNumber  String?         @map("table_number")
+  phone        String?
+  guestName    String?         @map("guest_name")
+  note         String?
+  /// [{ itemId, name, qty, unitPrice, lineTotal }]
+  lines        Json
+  itemCount    Int             @map("item_count")
+  subtotal     Decimal?        @db.Decimal(10, 2)
+  status       OrderStatusEnum @default(pending)
+  /// Who accepted or rejected it: "kcpl:<captain>" or "staff:<admin id>".
+  decidedBy    String?         @map("decided_by")
+  decidedAt    DateTime?       @map("decided_at")
+  rejectReason String?         @map("reject_reason")
+  /// Delivery of the payload to KCPL: sent | failed | skipped (not configured).
+  kcplStatus   String          @default("skipped") @map("kcpl_status")
+  kcplRef      String?         @map("kcpl_ref")
+  kcplError    String?         @map("kcpl_error")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([sessionId])
+  @@map("orders")
+}

@@ -56,6 +56,28 @@ const envSchema = z.object({
   SESSION_MAX: z.coerce.number().int().positive().default(5000),
   CART_MAX_LINES: z.coerce.number().int().positive().default(40),
 
+  /**
+   * KCPL, the floor platform captains work from. Every order sent from the cart
+   * is POSTed here as JSON for a captain to confirm at the table. Optional: empty
+   * means orders are only visible on the staff dashboard, where a captain can
+   * accept them by hand.
+   */
+  KCPL_ORDER_WEBHOOK_URL: z.string().default(""),
+  /**
+   * Shared both ways: sent to KCPL as `X-Milli-Secret`, and required from KCPL as
+   * `X-KCPL-Secret` on POST /api/orders/:id/decision. Empty disables that
+   * callback, so nobody can accept an order without staff sign-in.
+   */
+  KCPL_SHARED_SECRET: z.string().default(""),
+  KCPL_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  /**
+   * This API's public origin, e.g. https://mili-mili-backend.onrender.com. Used
+   * only to give KCPL an absolute callback URL; empty sends the path alone.
+   */
+  PUBLIC_API_URL: z.string().default(""),
+  /** Orders a guest can have waiting on a captain at once. */
+  ORDER_MAX_PENDING: z.coerce.number().int().positive().default(3),
+
   /** Offered after a 5-star rating. Empty means the link is simply left out. */
   GOOGLE_REVIEW_URL: z.string().default(""),
   /** A logged-in guest away longer than this gets "it's been a while". */

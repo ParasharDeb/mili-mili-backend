@@ -3,6 +3,7 @@ import { adminAuthRouter } from "./admin.auth.routes.ts";
 import { adminRouter } from "./admin.routes.ts";
 import { userAuthRouter } from "./user.auth.routes.ts";
 import { cartRouter } from "./cart.routes.ts";
+import { orderRouter } from "./order.routes.ts";
 import { menuRouter } from "./menu.routes.ts";
 import { feedbackRouter } from "./feedback.routes.ts";
 import { optionalAuth, requireAuth } from "../middleware/auth.ts";
@@ -31,3 +32,6 @@ apiRouter.use("/feedback", withSession, optionalAuth, feedbackRouter);
 
 // The order a guest is building, kept in memory for the length of their visit.
 apiRouter.use("/cart", withSession, cartRouter);
+
+// The cart, sent for a captain to confirm at the table. Also KCPL's callback.
+apiRouter.use("/orders", orderRouter);
